@@ -1,3 +1,5 @@
+//go:build unix
+
 package memcore
 
 import "golang.org/x/sys/unix"
