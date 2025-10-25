@@ -8,12 +8,14 @@ const zeroChunk64 uint64 = 0
 // Note: This is safe for most operating systems, but on certain exotic architectures,
 // the conversion can result in mismatches.
 func SizeOf[T any]() uint64 {
-	return (uint64)(unsafe.Sizeof(new(*T)))
+	var zero T
+	return (uint64)(unsafe.Sizeof(zero))
 }
 
 // AlignOf returns the alignment of an arbitary type.
 func AlignOf[T any]() uint64 {
-	return (uint64)(unsafe.Alignof(new(*T)))
+	var zero T
+	return (uint64)(unsafe.Alignof(zero))
 }
 
 // MemoryClearNoHeapPointers uses the go runtime internal memclrNoHeapPointers to set a given amount of memory to 0.

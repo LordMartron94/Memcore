@@ -1,3 +1,4 @@
+// Package memcore provides low-level core infrastructure for memory management.
 package memcore
 
 import (
