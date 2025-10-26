@@ -40,6 +40,8 @@ func FixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacity uint64) *Fixe
 
 // FixedOrderedListItemGetAt returns T at idx within the list.
 // It returns an error if the idx is invalid.
+//
+//go:inline
 func FixedOrderedListItemGetAt[T any](fixedList *FixedOrderedList[T], idx uint64) (T, error) {
 	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
 		var zero T
@@ -290,7 +292,15 @@ func FixedOrderedListBinarySearchInsertionPoint[T any](fixedList *FixedOrderedLi
 
 // FixedOrderedListClear resets the list to allow for reuse.
 // Using pointers to previous items in the array is undefined behaviour.
+// It does not zero the underlying memory as that is not necessary due to insertion semantics.
 func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
+	fixedList.length = 0
+}
+
+// FixedOrderedListClearAndZero resets the list to allow for reuse.
+// Using pointers to previous items in the array is undefined behaviour.
+// It does zero the underlying memory, use only for sensitive information.
+func FixedOrderedListClearAndZero[T any](fixedList *FixedOrderedList[T]) {
 	ArrayClear(fixedList.array)
 	fixedList.length = 0
 }
