@@ -108,3 +108,7 @@ func StackClearAndZero[T any](instance *Stack[T]) {
 	ArrayClear(instance.data)
 	instance.length = 0
 }
+
+func StackIsEmpty[T any](instance *Stack[T]) bool {
+	return instance.length == 0
+}
