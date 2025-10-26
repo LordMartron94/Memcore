@@ -205,25 +205,29 @@ func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uin
 // <br>- negative when item is below predicate
 // <br>- 0 when item is equal to predicate
 // <br>- positive when the item is above predicate
-func FixedOrderedListBinarySearch[T any](fixedList *FixedOrderedList[T], predicate func(item T) int8) (uint64, error) {
-	if fixedList.length == 0 {
+//
+//go:nosplit
+//go:inline
+func FixedOrderedListBinarySearch[T any](l *FixedOrderedList[T], predicate func(item T) int8) (uint64, error) {
+	n := l.length
+	if n == 0 {
 		return 0, fmt.Errorf("empty list")
 	}
 
-	var lowerBound uint64 = 0
-	var upperBound uint64 = fixedList.length - 1
+	lo := uint64(0)
+	hi := n
 
-	for lowerBound <= upperBound {
-		currentIdx := (lowerBound + upperBound) / 2 // Center
-		v := ArrayItemGetAtUnsafe(fixedList.array, currentIdx)
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		item := ArrayItemGetAtUnsafe(l.array, mid)
 
-		result := predicate(v)
-		if result < 0 {
-			lowerBound = currentIdx + 1
-		} else if result > 0 {
-			upperBound = currentIdx - 1
+		cmp := predicate(item)
+		if cmp < 0 {
+			lo = mid + 1
+		} else if cmp > 0 {
+			hi = mid
 		} else {
-			return currentIdx, nil
+			return mid, nil
 		}
 	}
 
@@ -239,38 +243,36 @@ func FixedOrderedListBinarySearch[T any](fixedList *FixedOrderedList[T], predica
 // The predicate function must return:
 // <br>- negative when item is below predicate
 // <br>- 0 or positive when the item is above predicate
-func FixedOrderedListBinarySearchInterval[T any](fixedList *FixedOrderedList[T], predicate func(item T) int8) (uint64, uint64) {
-	if fixedList.length == 0 {
+//
+//go:nosplit
+//go:inline
+func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predicate func(item T) int8) (uint64, uint64) {
+	n := l.length
+	if n == 0 {
 		return ^uint64(0), 0
 	}
 
-	var lowerBound uint64 = 0
-	var upperBound uint64 = fixedList.length
+	lo := uint64(0)
+	hi := n
 
-	for lowerBound < upperBound {
-		currentIdx := (lowerBound + upperBound) / 2 // Center
-		v := ArrayItemGetAtUnsafe(fixedList.array, currentIdx)
-
-		result := predicate(v)
-		if result < 0 {
-			lowerBound = currentIdx + 1
-			continue
-		}
-		if result >= 0 {
-			upperBound = currentIdx
-			continue
+	for lo < hi {
+		mid := (lo + hi) >> 1
+		item := ArrayItemGetAtUnsafe(l.array, mid)
+		if predicate(item) < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
 
-	if lowerBound == 0 {
-		return ^uint64(0), 0 // no previous, insert at beginning
+	switch {
+	case lo == 0:
+		return ^uint64(0), 0
+	case lo == n:
+		return n - 1, n
+	default:
+		return lo - 1, lo
 	}
-
-	if lowerBound == fixedList.length {
-		return fixedList.length - 1, fixedList.length
-	}
-
-	return lowerBound - 1, lowerBound
 }
 
 // FixedOrderedListBinarySearchInsertionPoint is a convencience wrapper around FixedListBinarySearchInterval,
