@@ -9,12 +9,33 @@ import (
 // FixedOrderedList is a list of fixed size.
 // It uses an array under the hood but enforces sequential semantics.
 type FixedOrderedList[T any] struct {
-	array  *Array[T]
-	length uint64
+	dataArray *Array[T]
+	indices   *Array[uint64]
+	freeList  *Stack[uint64]
+
+	length   uint64
+	capacity uint64
+}
+
+// FixedOrderedListRequiredBytes computes the necessary amount of bytes for the fixed list.
+func FixedOrderedListRequiredBytes[T any](capacity uint64) uint64 {
+	sizeData := alignIdxUp(
+		capacity*memcore.SizeOf[T](),
+		memcore.AlignOf[T](),
+	)
+	sizeIndices := alignIdxUp(
+		capacity*memcore.SizeOf[uint64](),
+		memcore.AlignOf[uint64](),
+	)
+	sizeFreelist := alignIdxUp(
+		capacity*memcore.SizeOf[uint64](),
+		memcore.AlignOf[uint64](),
+	)
+	return sizeData + sizeIndices + sizeFreelist
 }
 
 // FixedOrderedListCreateAt creates an instance of a fixed list for type T at a specific memory address.
-// Ensure the address is properly aligned and has the right size.
+// Ensure the address is properly aligned and has the right size (call FixedOrderedListRequiredBytes to compute).
 //
 // ⚠️ capacity is in elements, not bytes.
 // When using memory returned from a byte allocator,
@@ -30,11 +51,30 @@ type FixedOrderedList[T any] struct {
 //	✅ Safe:   header on Go heap, data in manual memory
 //	❌ Unsafe: header and data both in manual memory
 func FixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacity uint64) *FixedOrderedList[T] {
-	array := ArrayCreateAt[T](addr, capacity)
+	sizeIndices := alignIdxUp(capacity*memcore.SizeOf[uint64](), memcore.AlignOf[uint64]())
+	sizeFreelist := alignIdxUp(capacity*memcore.SizeOf[uint64](), memcore.AlignOf[uint64]())
+
+	// --- derive subaddresses
+	indicesAddr := addr
+	freeListAddr := unsafe.Add(indicesAddr, sizeIndices)
+	dataAddr := unsafe.Add(freeListAddr, sizeFreelist)
+
+	// --- build subcontainers
+	indices := ArrayCreateAt[uint64](indicesAddr, capacity)
+	freeList := StackCreateAt[uint64](freeListAddr, capacity)
+	data := ArrayCreateAt[T](dataAddr, capacity)
+
+	// --- fill freelist with all available slots
+	for i := uint64(0); i < capacity; i++ {
+		StackPushUnsafe(freeList, i)
+	}
 
 	return &FixedOrderedList[T]{
-		array:  array,
-		length: 0,
+		dataArray: data,
+		indices:   indices,
+		freeList:  freeList,
+		length:    0,
+		capacity:  capacity,
 	}
 }
 
@@ -49,7 +89,7 @@ func FixedOrderedListItemGetAt[T any](fixedList *FixedOrderedList[T], idx uint64
 		return zero, err
 	}
 
-	item := ArrayItemGetAtUnsafe(fixedList.array, idx)
+	item := fixedListGetElement(fixedList, idx)
 	return item, nil
 }
 
@@ -59,7 +99,7 @@ func FixedOrderedListItemGetAt[T any](fixedList *FixedOrderedList[T], idx uint64
 //go:inline
 //go:nosplit
 func FixedOrderedListItemGetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) T {
-	return ArrayItemGetAtUnsafe(fixedList.array, idx)
+	return fixedListGetElement(fixedList, idx)
 }
 
 // FixedOrderedListItemPtrGetAt returns a pointer to  T at idx within the list.
@@ -75,7 +115,7 @@ func FixedOrderedListItemPtrGetAt[T any](fixedList *FixedOrderedList[T], idx uin
 		return nil, err
 	}
 
-	item := ArrayItemPtrGetAtUnsafe(fixedList.array, idx)
+	item := fixedListGetElementPtr(fixedList, idx)
 	return item, nil
 }
 
@@ -88,16 +128,19 @@ func FixedOrderedListItemPtrGetAt[T any](fixedList *FixedOrderedList[T], idx uin
 //go:inline
 //go:nosplit
 func FixedOrderedListItemPtrGetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) *T {
-	return ArrayItemPtrGetAtUnsafe(fixedList.array, idx)
+	return fixedListGetElementPtr(fixedList, idx)
 }
 
-// FixedOrderedListInsert adds an item into the fixed list.
+// FixedOrderedListAppend adds an item into the fixed list.
 // It returns an error if the bounds are invalid.
 //
 //go:nosplit
 //go:inline
-func FixedOrderedListInsert[T any](fixedList *FixedOrderedList[T], item T) error {
-	if err := ArraySetAt(fixedList.array, fixedList.length, item); err != nil {
+func FixedOrderedListAppend[T any](fixedList *FixedOrderedList[T], item T) error {
+	slot := StackPopUnsafe(fixedList.freeList)
+	ArraySetAtUnsafe(fixedList.indices, fixedList.length, slot)
+
+	if err := ArraySetAt(fixedList.dataArray, slot, item); err != nil {
 		return err
 	}
 
@@ -106,13 +149,15 @@ func FixedOrderedListInsert[T any](fixedList *FixedOrderedList[T], item T) error
 	return nil
 }
 
-// FixedOrderedListInsertUnsafe adds an item into the fixed list.
+// FixedOrderedListAppendUnsafe adds an item into the fixed list.
 // It does not do bounds checks.
 //
 //go:nosplit
 //go:inline
-func FixedOrderedListInsertUnsafe[T any](fixedList *FixedOrderedList[T], item T) {
-	ArraySetAtUnsafe(fixedList.array, fixedList.length, item)
+func FixedOrderedListAppendUnsafe[T any](fixedList *FixedOrderedList[T], item T) {
+	slot := StackPopUnsafe(fixedList.freeList)
+	ArraySetAtUnsafe(fixedList.indices, fixedList.length, slot)
+	ArraySetAtUnsafe(fixedList.dataArray, slot, item)
 
 	fixedList.length++
 }
@@ -127,8 +172,9 @@ func FixedOrderedListSetAt[T any](fixedList *FixedOrderedList[T], idx uint64, va
 		return error
 	}
 
-	currentPtr := fixedListGetPtrAtIdx(fixedList, idx)
-	*(*T)(currentPtr) = value
+	physicalIdx := ArrayItemGetAtUnsafe(fixedList.indices, idx)
+	currentPtr := ArrayItemPtrGetAtUnsafe(fixedList.dataArray, physicalIdx)
+	*currentPtr = value
 
 	return nil
 }
@@ -139,8 +185,9 @@ func FixedOrderedListSetAt[T any](fixedList *FixedOrderedList[T], idx uint64, va
 //go:nosplit
 //go:inline
 func FixedOrderedListSetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
-	currentPtr := fixedListGetPtrAtIdx(fixedList, idx)
-	*(*T)(currentPtr) = value
+	physicalIdx := ArrayItemGetAtUnsafe(fixedList.indices, idx)
+	currentPtr := ArrayItemPtrGetAtUnsafe(fixedList.dataArray, physicalIdx)
+	*currentPtr = value
 }
 
 // FixedOrderedListInsertAt inserts a value T into the list at position idx,
@@ -159,20 +206,14 @@ func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64,
 	if err := fixedListGuaranteeIdxInsertionValidity(fixedList, idx); err != nil {
 		return err
 	}
-	if fixedList.length >= fixedList.array.capacity {
+	if fixedList.length >= fixedList.dataArray.capacity {
 		return fmt.Errorf("no space left in fixed list, capacity reached")
 	}
 
-	itemSize := fixedList.array.itemSize
-	src := unsafe.Add(fixedList.array.ptr, idx*itemSize)
-	dst := unsafe.Add(src, itemSize)
-	moveBytes := uintptr((fixedList.length - idx) * itemSize)
+	slot := StackPopUnsafe(fixedList.freeList)
+	ArraySetAtUnsafe(fixedList.dataArray, slot, value)
+	fixedListInsertIndex(fixedList, idx, slot)
 
-	if moveBytes > 0 {
-		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
-	}
-
-	ArraySetAtUnsafe(fixedList.array, idx, value)
 	fixedList.length++
 	return nil
 }
@@ -190,16 +231,10 @@ func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64,
 //
 //go:nosplit
 func FixedOrderedListInsertAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
-	itemSize := fixedList.array.itemSize
-	src := unsafe.Add(fixedList.array.ptr, idx*itemSize)
-	dst := unsafe.Add(src, itemSize)
-	moveBytes := uintptr((fixedList.length - idx) * itemSize)
+	slot := StackPopUnsafe(fixedList.freeList)
+	ArraySetAtUnsafe(fixedList.dataArray, slot, value)
+	fixedListInsertIndex(fixedList, idx, slot)
 
-	if moveBytes > 0 {
-		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
-	}
-
-	ArraySetAtUnsafe(fixedList.array, idx, value)
 	fixedList.length++
 }
 
@@ -213,14 +248,9 @@ func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) e
 		return err
 	}
 
-	itemSize := fixedList.array.itemSize
-	src := unsafe.Add(fixedList.array.ptr, (idx+1)*itemSize)
-	dst := unsafe.Add(fixedList.array.ptr, idx*itemSize)
-	moveBytes := uintptr((fixedList.length - idx - 1) * itemSize)
-
-	if moveBytes > 0 {
-		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
-	}
+	slot := ArrayItemGetAtUnsafe(fixedList.indices, idx)
+	fixedListRemoveIndex(fixedList, idx)
+	StackPushUnsafe(fixedList.freeList, slot)
 
 	fixedList.length--
 	return nil
@@ -233,37 +263,11 @@ func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) e
 //
 //go:nosplit
 func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) {
-	itemSize := fixedList.array.itemSize
-	src := unsafe.Add(fixedList.array.ptr, (idx+1)*itemSize)
-	dst := unsafe.Add(fixedList.array.ptr, idx*itemSize)
-	moveBytes := uintptr((fixedList.length - idx - 1) * itemSize)
-
-	if moveBytes > 0 {
-		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
-	}
+	slot := ArrayItemGetAtUnsafe(fixedList.indices, idx)
+	fixedListRemoveIndex(fixedList, idx)
+	StackPushUnsafe(fixedList.freeList, slot)
 
 	fixedList.length--
-}
-
-// FixedOrderedListReplace replaces idx with newValue T
-//
-//go:nosplit
-func FixedOrderedListReplace[T any](fixedList *FixedOrderedList[T], idx uint64, newValue T) error {
-	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
-		return err
-	}
-
-	ArraySetAtUnsafe(fixedList.array, idx, newValue)
-	return nil
-}
-
-// FixedOrderedListReplaceUnsafe replaces idx with newValue T
-// Performs no bounds checks.
-//
-//go:nosplit
-//go:inline
-func FixedOrderedListReplaceUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, newValue T) {
-	ArraySetAtUnsafe(fixedList.array, idx, newValue)
 }
 
 // FixedOrderedListBinarySearch performs a binary search O(log n) to find a value matching
@@ -292,7 +296,7 @@ func FixedOrderedListBinarySearch[T any](l *FixedOrderedList[T], predicate func(
 
 	for lo < hi {
 		mid := (lo + hi) >> 1
-		item := ArrayItemGetAtUnsafe(l.array, mid)
+		item := fixedListGetElement(l, mid)
 
 		cmp := predicate(item)
 		if cmp < 0 {
@@ -330,7 +334,7 @@ func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predica
 
 	for lo < hi {
 		mid := (lo + hi) >> 1
-		item := ArrayItemGetAtUnsafe(l.array, mid)
+		item := fixedListGetElement(l, mid)
 
 		if predicate(item) < 0 {
 			lo = mid + 1
@@ -375,6 +379,11 @@ func FixedOrderedListBinarySearchInsertionPoint[T any](fixedList *FixedOrderedLi
 //go:inline
 func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
 	fixedList.length = 0
+	StackClear(fixedList.freeList)
+
+	for i := uint64(0); i < fixedList.capacity; i++ {
+		StackPushUnsafe(fixedList.freeList, i)
+	}
 }
 
 // FixedOrderedListClearAndZero resets the list to allow for reuse.
@@ -384,12 +393,18 @@ func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
 //go:nosplit
 //go:inline
 func FixedOrderedListClearAndZero[T any](fixedList *FixedOrderedList[T]) {
-	ArrayClear(fixedList.array)
+	ArrayClear(fixedList.dataArray)
+	StackClearAndZero(fixedList.freeList)
+
+	for i := uint64(0); i < fixedList.capacity; i++ {
+		StackPushUnsafe(fixedList.freeList, i)
+	}
+
 	fixedList.length = 0
 }
 
 func FixedOrderedListLengthGet[T any](l *FixedOrderedList[T]) uint64   { return l.length }
-func FixedOrderedListCapacityGet[T any](l *FixedOrderedList[T]) uint64 { return l.array.capacity }
+func FixedOrderedListCapacityGet[T any](l *FixedOrderedList[T]) uint64 { return l.capacity }
 
 // FixedOrderedListIsIdxValid checks whether the given index is valid.
 //
@@ -401,9 +416,46 @@ func FixedOrderedListIsIdxValid[T any](l *FixedOrderedList[T], idx uint64) bool 
 // ----------------------------------------------- PRIVATE HELPERS
 
 //go:inline
+func fixedListInsertIndex[T any](fixedList *FixedOrderedList[T], logicalIdx uint64, slot uint64) {
+	n := fixedList.length
+	for i := n; i > logicalIdx; i-- {
+		prev := ArrayItemGetAtUnsafe(fixedList.indices, i-1)
+		ArraySetAtUnsafe(fixedList.indices, i, prev)
+	}
+
+	ArraySetAtUnsafe(fixedList.indices, logicalIdx, slot)
+}
+
+//go:inline
+func fixedListRemoveIndex[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) {
+	n := fixedList.length
+	for i := logicalIdx; i+1 < n; i++ {
+		next := ArrayItemGetAtUnsafe(fixedList.indices, i+1)
+		ArraySetAtUnsafe(fixedList.indices, i, next)
+	}
+}
+
+//go:inline
+func fixedListGetPhysicalIdx[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) uint64 {
+	return ArrayItemGetAtUnsafe(fixedList.indices, logicalIdx)
+}
+
+//go:inline
+func fixedListGetElement[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) T {
+	physicalIdx := fixedListGetPhysicalIdx(fixedList, logicalIdx)
+	return ArrayItemGetAtUnsafe(fixedList.dataArray, physicalIdx)
+}
+
+//go:inline
+func fixedListGetElementPtr[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) *T {
+	physicalIdx := fixedListGetPhysicalIdx(fixedList, logicalIdx)
+	return ArrayItemPtrGetAtUnsafe(fixedList.dataArray, physicalIdx)
+}
+
+//go:inline
 func fixedListGuaranteeIdxInsertionValidity[T any](fixedList *FixedOrderedList[T], idx uint64) error {
-	if idx >= fixedList.array.capacity {
-		return fmt.Errorf("index %v out of bounds: capacity %v", idx, fixedList.array.capacity)
+	if idx >= fixedList.capacity {
+		return fmt.Errorf("index %v out of bounds: capacity %v", idx, fixedList.capacity)
 	}
 	if idx > fixedList.length {
 		return fmt.Errorf("invalid index: %v, must be between 0 and %v (inclusive)", idx, fixedList.length)
@@ -419,9 +471,4 @@ func fixedListGuaranteeIdxReadValidity[T any](fixedList *FixedOrderedList[T], id
 	}
 
 	return nil
-}
-
-//go:inline
-func fixedListGetPtrAtIdx[T any](fixedList *FixedOrderedList[T], idx uint64) unsafe.Pointer {
-	return unsafe.Add(fixedList.array.ptr, idx*fixedList.array.itemSize)
 }
