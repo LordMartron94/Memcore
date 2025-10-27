@@ -2,7 +2,6 @@ package primitives
 
 import (
 	"fmt"
-	"memcore"
 	"unsafe"
 )
 
@@ -171,9 +170,6 @@ func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) e
 		ArraySetAtUnsafe(fixedList.array, i, nextVal)
 	}
 
-	lastPtr := fixedListGetPtrAtIdx(fixedList, fixedList.length-1)
-	memcore.MemoryClearNoHeapPointers(lastPtr, uintptr(fixedList.array.itemSize))
-
 	fixedList.length--
 
 	return nil
@@ -188,10 +184,24 @@ func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uin
 		nextVal := ArrayItemGetAtUnsafe(fixedList.array, i+1)
 		ArraySetAtUnsafe(fixedList.array, i, nextVal)
 	}
-	lastPtr := fixedListGetPtrAtIdx(fixedList, fixedList.length-1)
-	memcore.MemoryClearNoHeapPointers(lastPtr, uintptr(fixedList.array.itemSize))
 
 	fixedList.length--
+}
+
+// FixedOrderedListReplace replaces idx with newValue T
+func FixedOrderedListReplace[T any](fixedList *FixedOrderedList[T], idx uint64, newValue T) error {
+	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
+		return err
+	}
+
+	ArraySetAtUnsafe(fixedList.array, idx, newValue)
+	return nil
+}
+
+// FixedOrderedListReplaceUnsafe replaces idx with newValue T
+// Performs no bounds checks.
+func FixedOrderedListReplaceUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, newValue T) {
+	ArraySetAtUnsafe(fixedList.array, idx, newValue)
 }
 
 // FixedOrderedListBinarySearch performs a binary search O(log n) to find a value matching
@@ -205,6 +215,7 @@ func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uin
 // <br>- negative when item is below predicate
 // <br>- 0 when item is equal to predicate
 // <br>- positive when the item is above predicate
+// <br>- 127 to skip
 //
 //go:nosplit
 //go:inline
@@ -258,6 +269,7 @@ func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predica
 	for lo < hi {
 		mid := (lo + hi) >> 1
 		item := ArrayItemGetAtUnsafe(l.array, mid)
+
 		if predicate(item) < 0 {
 			lo = mid + 1
 		} else {
@@ -265,10 +277,10 @@ func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predica
 		}
 	}
 
-	switch {
-	case lo == 0:
+	switch lo {
+	case 0:
 		return ^uint64(0), 0
-	case lo == n:
+	case n:
 		return n - 1, n
 	default:
 		return lo - 1, lo
