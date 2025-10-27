@@ -2,6 +2,7 @@ package primitives
 
 import (
 	"fmt"
+	"memcore"
 	"unsafe"
 )
 
@@ -158,22 +159,17 @@ func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64,
 	if err := fixedListGuaranteeIdxInsertionValidity(fixedList, idx); err != nil {
 		return err
 	}
-
-	// Empty list fast path
-	if fixedList.length == 0 && idx == 0 {
-		ArraySetAtUnsafe(fixedList.array, 0, value)
-		fixedList.length = 1
-		return nil
-	}
-
-	// Ensure capacity before shifting
 	if fixedList.length >= fixedList.array.capacity {
 		return fmt.Errorf("no space left in fixed list, capacity reached")
 	}
 
-	// Shift elements right to open slot at idx
-	for i := fixedList.length; i > idx; i-- {
-		ArraySetAtUnsafe(fixedList.array, i, ArrayItemGetAtUnsafe(fixedList.array, i-1))
+	itemSize := fixedList.array.itemSize
+	src := unsafe.Add(fixedList.array.ptr, idx*itemSize)
+	dst := unsafe.Add(src, itemSize)
+	moveBytes := uintptr((fixedList.length - idx) * itemSize)
+
+	if moveBytes > 0 {
+		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
 	}
 
 	ArraySetAtUnsafe(fixedList.array, idx, value)
@@ -194,9 +190,15 @@ func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64,
 //
 //go:nosplit
 func FixedOrderedListInsertAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
-	for i := fixedList.length; i > idx; i-- {
-		ArraySetAtUnsafe(fixedList.array, i, ArrayItemGetAtUnsafe(fixedList.array, i-1))
+	itemSize := fixedList.array.itemSize
+	src := unsafe.Add(fixedList.array.ptr, idx*itemSize)
+	dst := unsafe.Add(src, itemSize)
+	moveBytes := uintptr((fixedList.length - idx) * itemSize)
+
+	if moveBytes > 0 {
+		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
 	}
+
 	ArraySetAtUnsafe(fixedList.array, idx, value)
 	fixedList.length++
 }
@@ -211,13 +213,16 @@ func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) e
 		return err
 	}
 
-	for i := idx; i < fixedList.length-1; i++ {
-		nextVal := ArrayItemGetAtUnsafe(fixedList.array, i+1)
-		ArraySetAtUnsafe(fixedList.array, i, nextVal)
+	itemSize := fixedList.array.itemSize
+	src := unsafe.Add(fixedList.array.ptr, (idx+1)*itemSize)
+	dst := unsafe.Add(fixedList.array.ptr, idx*itemSize)
+	moveBytes := uintptr((fixedList.length - idx - 1) * itemSize)
+
+	if moveBytes > 0 {
+		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
 	}
 
 	fixedList.length--
-
 	return nil
 }
 
@@ -228,9 +233,13 @@ func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) e
 //
 //go:nosplit
 func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) {
-	for i := idx; i < fixedList.length-1; i++ {
-		nextVal := ArrayItemGetAtUnsafe(fixedList.array, i+1)
-		ArraySetAtUnsafe(fixedList.array, i, nextVal)
+	itemSize := fixedList.array.itemSize
+	src := unsafe.Add(fixedList.array.ptr, (idx+1)*itemSize)
+	dst := unsafe.Add(fixedList.array.ptr, idx*itemSize)
+	moveBytes := uintptr((fixedList.length - idx - 1) * itemSize)
+
+	if moveBytes > 0 {
+		memcore.MemoryMoveNoHeapPointers(dst, src, moveBytes)
 	}
 
 	fixedList.length--
