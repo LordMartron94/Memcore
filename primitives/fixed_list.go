@@ -41,14 +41,14 @@ func FixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacity uint64) *Fixe
 // It returns an error if the idx is invalid.
 //
 //go:inline
+//go:nosplit
 func FixedOrderedListItemGetAt[T any](fixedList *FixedOrderedList[T], idx uint64) (T, error) {
 	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
 		var zero T
 		return zero, err
 	}
 
-	item := ArrayItemGetAtUnsafe(fixedList.array, idx) // unsafe because length is
-	// always smaller than or equal to array capacity, so we don't also need internal bounds check.
+	item := ArrayItemGetAtUnsafe(fixedList.array, idx)
 	return item, nil
 }
 
@@ -56,12 +56,45 @@ func FixedOrderedListItemGetAt[T any](fixedList *FixedOrderedList[T], idx uint64
 // It does no bounds checks.
 //
 //go:inline
+//go:nosplit
 func FixedOrderedListItemGetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) T {
 	return ArrayItemGetAtUnsafe(fixedList.array, idx)
 }
 
+// FixedOrderedListItemPtrGetAt returns a pointer to  T at idx within the list.
+// It returns an error if the idx is invalid.
+//
+// Using this pointer after deletion or overwriting this idx is undefined behaviour.
+// Use at your own discretion!
+//
+//go:inline
+//go:nosplit
+func FixedOrderedListItemPtrGetAt[T any](fixedList *FixedOrderedList[T], idx uint64) (*T, error) {
+	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
+		return nil, err
+	}
+
+	item := ArrayItemPtrGetAtUnsafe(fixedList.array, idx)
+	return item, nil
+}
+
+// FixedOrderedListItemPtrGetAtUnsafe returns a pointer to T at idx within the list.
+// It does no bounds checks.
+//
+// Using this pointer after deletion or overwriting this idx is undefined behaviour.
+// Use at your own discretion!
+//
+//go:inline
+//go:nosplit
+func FixedOrderedListItemPtrGetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) *T {
+	return ArrayItemPtrGetAtUnsafe(fixedList.array, idx)
+}
+
 // FixedOrderedListInsert adds an item into the fixed list.
 // It returns an error if the bounds are invalid.
+//
+//go:nosplit
+//go:inline
 func FixedOrderedListInsert[T any](fixedList *FixedOrderedList[T], item T) error {
 	if err := ArraySetAt(fixedList.array, fixedList.length, item); err != nil {
 		return err
@@ -74,6 +107,9 @@ func FixedOrderedListInsert[T any](fixedList *FixedOrderedList[T], item T) error
 
 // FixedOrderedListInsertUnsafe adds an item into the fixed list.
 // It does not do bounds checks.
+//
+//go:nosplit
+//go:inline
 func FixedOrderedListInsertUnsafe[T any](fixedList *FixedOrderedList[T], item T) {
 	ArraySetAtUnsafe(fixedList.array, fixedList.length, item)
 
@@ -82,6 +118,9 @@ func FixedOrderedListInsertUnsafe[T any](fixedList *FixedOrderedList[T], item T)
 
 // FixedOrderedListSetAt sets idx of list to value T.
 // It returns an error if the idx is invalid.
+//
+//go:nosplit
+//go:inline
 func FixedOrderedListSetAt[T any](fixedList *FixedOrderedList[T], idx uint64, value T) error {
 	if error := fixedListGuaranteeIdxInsertionValidity(fixedList, idx); error != nil {
 		return error
@@ -95,6 +134,9 @@ func FixedOrderedListSetAt[T any](fixedList *FixedOrderedList[T], idx uint64, va
 
 // FixedOrderedListSetAtUnsafe sets idx of list to value T.
 // It does no bounds checks.
+//
+//go:nosplit
+//go:inline
 func FixedOrderedListSetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
 	currentPtr := fixedListGetPtrAtIdx(fixedList, idx)
 	*(*T)(currentPtr) = value
@@ -149,6 +191,8 @@ func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64,
 // Precondition:
 //   - The caller must ensure there is at least one free slot remaining.
 //   - The caller must ensure idx <= length.
+//
+//go:nosplit
 func FixedOrderedListInsertAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
 	for i := fixedList.length; i > idx; i-- {
 		ArraySetAtUnsafe(fixedList.array, i, ArrayItemGetAtUnsafe(fixedList.array, i-1))
@@ -160,6 +204,8 @@ func FixedOrderedListInsertAtUnsafe[T any](fixedList *FixedOrderedList[T], idx u
 // FixedOrderedListDelete deletes the element at idx and shifts subsequent
 // elements left by one slot. The last element is cleared.
 // Returns an error if idx is invalid.
+//
+//go:nosplit
 func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) error {
 	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
 		return err
@@ -179,6 +225,8 @@ func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) e
 // It does no validation checks at all.
 //
 // Precondition: idx must be valid, otherwise undefined behaviour.
+//
+//go:nosplit
 func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) {
 	for i := idx; i < fixedList.length-1; i++ {
 		nextVal := ArrayItemGetAtUnsafe(fixedList.array, i+1)
@@ -189,6 +237,8 @@ func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uin
 }
 
 // FixedOrderedListReplace replaces idx with newValue T
+//
+//go:nosplit
 func FixedOrderedListReplace[T any](fixedList *FixedOrderedList[T], idx uint64, newValue T) error {
 	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
 		return err
@@ -200,6 +250,9 @@ func FixedOrderedListReplace[T any](fixedList *FixedOrderedList[T], idx uint64, 
 
 // FixedOrderedListReplaceUnsafe replaces idx with newValue T
 // Performs no bounds checks.
+//
+//go:nosplit
+//go:inline
 func FixedOrderedListReplaceUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, newValue T) {
 	ArraySetAtUnsafe(fixedList.array, idx, newValue)
 }
@@ -293,6 +346,8 @@ func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predica
 // The predicate function must return:
 // <br>- negative when item is below predicate
 // <br>- 0 or positive when the item is above predicate
+//
+//go:nosplit
 func FixedOrderedListBinarySearchInsertionPoint[T any](fixedList *FixedOrderedList[T], predicate func(item T) int8) uint64 {
 	if fixedList.length == 0 {
 		return 0
@@ -307,6 +362,8 @@ func FixedOrderedListBinarySearchInsertionPoint[T any](fixedList *FixedOrderedLi
 // FixedOrderedListClear resets the list to allow for reuse.
 // Using pointers to previous items in the array is undefined behaviour.
 // It does not zero the underlying memory as that is not necessary due to insertion semantics.
+//
+//go:inline
 func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
 	fixedList.length = 0
 }
@@ -314,6 +371,9 @@ func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
 // FixedOrderedListClearAndZero resets the list to allow for reuse.
 // Using pointers to previous items in the array is undefined behaviour.
 // It does zero the underlying memory, use only for sensitive information.
+//
+//go:nosplit
+//go:inline
 func FixedOrderedListClearAndZero[T any](fixedList *FixedOrderedList[T]) {
 	ArrayClear(fixedList.array)
 	fixedList.length = 0
@@ -327,10 +387,6 @@ func FixedOrderedListCapacityGet[T any](l *FixedOrderedList[T]) uint64 { return 
 //go:inline
 func FixedOrderedListIsIdxValid[T any](l *FixedOrderedList[T], idx uint64) bool {
 	return idx < l.length
-}
-
-func UnsafeRawPtr[T any](l *FixedOrderedList[T]) unsafe.Pointer {
-	return unsafe.Pointer(fixedListGetPtrAtIdx(l, 0))
 }
 
 // ----------------------------------------------- PRIVATE HELPERS

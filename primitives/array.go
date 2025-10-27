@@ -64,6 +64,30 @@ func ArrayItemGetAtUnsafe[T any](array *Array[T], idx uint64) T {
 	return *(*T)(arrayGetPtrAtIdx(array, idx))
 }
 
+// ArrayItemPtrGetAt returns a pointer to T at idx within the array.
+// It returns an error if the idx is invalid.
+//
+// Using this pointer after deletion or overwriting this idx is undefined behaviour.
+// Use at your own discretion!
+func ArrayItemPtrGetAt[T any](array *Array[T], idx uint64) (*T, error) {
+	if error := arrayGuaranteeIdxValidity(array, idx); error != nil {
+		return nil, error
+	}
+
+	return (*T)(arrayGetPtrAtIdx(array, idx)), nil
+}
+
+// ArrayItemPtrGetAtUnsafe returns a pointer to T at idx within the array.
+// It does no bounds checks.
+//
+// Using this pointer after deletion or overwriting this idx is undefined behaviour.
+// Use at your own discretion!
+//
+//go:inline
+func ArrayItemPtrGetAtUnsafe[T any](array *Array[T], idx uint64) *T {
+	return (*T)(arrayGetPtrAtIdx(array, idx))
+}
+
 // ArraySetAt sets idx of array to value T.
 // It returns an error if the idx is invalid.
 func ArraySetAt[T any](array *Array[T], idx uint64, value T) error {
