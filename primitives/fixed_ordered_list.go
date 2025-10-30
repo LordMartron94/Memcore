@@ -162,34 +162,6 @@ func FixedOrderedListAppendUnsafe[T any](fixedList *FixedOrderedList[T], item T)
 	fixedList.length++
 }
 
-// FixedOrderedListSetAt sets idx of list to value T.
-// It returns an error if the idx is invalid.
-//
-//go:nosplit
-//go:inline
-func FixedOrderedListSetAt[T any](fixedList *FixedOrderedList[T], idx uint64, value T) error {
-	if error := fixedListGuaranteeIdxInsertionValidity(fixedList, idx); error != nil {
-		return error
-	}
-
-	physicalIdx := ArrayItemGetAtUnsafe(fixedList.indices, idx)
-	currentPtr := ArrayItemPtrGetAtUnsafe(fixedList.dataArray, physicalIdx)
-	*currentPtr = value
-
-	return nil
-}
-
-// FixedOrderedListSetAtUnsafe sets idx of list to value T.
-// It does no bounds checks.
-//
-//go:nosplit
-//go:inline
-func FixedOrderedListSetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
-	physicalIdx := ArrayItemGetAtUnsafe(fixedList.indices, idx)
-	currentPtr := ArrayItemPtrGetAtUnsafe(fixedList.dataArray, physicalIdx)
-	*currentPtr = value
-}
-
 // FixedOrderedListInsertAt inserts a value T into the list at position idx,
 // shifting all elements from idx through length-1 one slot to the right
 // to make space for the new element.

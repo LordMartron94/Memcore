@@ -23,12 +23,12 @@ type SegmentedFixedOrderedList[T any] struct {
 	chunkHeaders *Array[chunkHeader]
 
 	globalCapacityElements uint64
+	globalLengthElements   uint64
 }
 
 // SegmentedFixedOrderedListCapacityBytesGet computes the necessary amount of bytes for the segmented fixed list.
 func SegmentedFixedOrderedListCapacityBytesGet[T any](capacityElements uint64) uint64 {
-	chunkAmount := capacityElements >> chunkBitShiftAmount
-	chunkAmount = max(chunkAmount, 1)
+	chunkAmount := (capacityElements + chunkSizeElements - 1) >> chunkBitShiftAmount
 
 	chunkArraySize := segmentedFixedOrderedListChunkBytes[T]() * chunkAmount
 	chunkHeaderArraySize := segmentedFixedOrderedListChunkHeaderArrayBytes(chunkAmount)
@@ -53,8 +53,7 @@ func SegmentedFixedOrderedListCapacityBytesGet[T any](capacityElements uint64) u
 //	✅ Safe:   header on Go heap, data in manual memory
 //	❌ Unsafe: header and data both in manual memory
 func SegmentedFixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacityElements uint64) *SegmentedFixedOrderedList[T] {
-	chunkAmount := capacityElements >> chunkBitShiftAmount
-	chunkAmount = max(chunkAmount, 1)
+	chunkAmount := (capacityElements + chunkSizeElements - 1) >> chunkBitShiftAmount
 	chunkHeaderArrayBytes := segmentedFixedOrderedListChunkHeaderArrayBytes(chunkAmount)
 
 	chunkHeadersAddr := addr
@@ -64,13 +63,19 @@ func SegmentedFixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacityEleme
 	chunks := make([]*FixedOrderedList[T], chunkAmount)
 	chunkHeaders := ArrayCreateAt[chunkHeader](chunkHeadersAddr, chunkAmount)
 	for i := uint64(0); i < chunkAmount; i++ {
+		remaining := uint64(chunkSizeElements)
+		start := i * chunkSizeElements
+		if start+remaining > capacityElements {
+			remaining = capacityElements - start
+		}
+
 		ArraySetAtUnsafe(chunkHeaders, i, chunkHeader{
-			minGlobalIdx:   i * chunkSizeElements,
-			maxGlobalIdx:   (i+1)*chunkSizeElements - 1,
-			remainingSlots: uint8(chunkSizeElements),
+			minGlobalIdx:   start,
+			maxGlobalIdx:   start + remaining - 1,
+			remainingSlots: uint8(remaining),
 		})
 
-		chunkAddr := unsafe.Add(chunkStartAddr, (i * chunkBytes))
+		chunkAddr := unsafe.Add(chunkStartAddr, i*chunkBytes)
 		chunks[i] = FixedOrderedListCreateAt[T](chunkAddr, chunkSizeElements)
 	}
 
@@ -78,6 +83,7 @@ func SegmentedFixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacityEleme
 		chunks:                 chunks,
 		chunkHeaders:           chunkHeaders,
 		globalCapacityElements: capacityElements,
+		globalLengthElements:   0,
 	}
 }
 
@@ -93,6 +99,8 @@ func SegmentedFixedOrderedListClear[T any](segmentedList *SegmentedFixedOrderedL
 		hdr := ArrayItemPtrGetAtUnsafe(segmentedList.chunkHeaders, i)
 		hdr.remainingSlots = uint8(chunkSizeElements)
 	}
+
+	segmentedList.globalLengthElements = 0
 }
 
 // SegmentedFixedOrderedListClearAndZero clears the segmented fixed ordered list for re-use.
@@ -107,6 +115,8 @@ func SegmentedFixedOrderedListClearAndZero[T any](segmentedList *SegmentedFixedO
 		hdr := ArrayItemPtrGetAtUnsafe(segmentedList.chunkHeaders, i)
 		hdr.remainingSlots = uint8(chunkSizeElements)
 	}
+
+	segmentedList.globalLengthElements = 0
 }
 
 // SegmentedFixedOrderedListAppend adds an item into the segmented fixed list.
@@ -121,6 +131,7 @@ func SegmentedFixedOrderedListAppend[T any](seg *SegmentedFixedOrderedList[T], v
 		if h.remainingSlots > 0 {
 			FixedOrderedListAppendUnsafe(seg.chunks[i], value)
 			h.remainingSlots--
+			seg.globalLengthElements++
 			return nil
 		}
 	}
@@ -155,13 +166,13 @@ func SegmentedFixedOrderedListAppend[T any](seg *SegmentedFixedOrderedList[T], v
 //   - Spill propagation strictly moves rightward.
 //   - The total number of free slots across all chunks remains constant.
 func SegmentedFixedOrderedListInsert[T any](segmentedList *SegmentedFixedOrderedList[T], idx uint64, value T) error {
+	if err := segmentedFixedListGuaranteeIdxInsertionValidity(segmentedList, idx); err != nil {
+		return err
+	}
+
 	chunkIdx := idx >> chunkBitShiftAmount
 
 	chunkAmount := ArrayCapacityGet(segmentedList.chunkHeaders)
-	if chunkIdx >= chunkAmount {
-		return fmt.Errorf("cannot insert: idx %v out of bounds", idx)
-	}
-
 	chunk := segmentedList.chunks[chunkIdx]
 
 	chunkLocalIdx := idx & chunkBitAndAmount
@@ -170,6 +181,7 @@ func SegmentedFixedOrderedListInsert[T any](segmentedList *SegmentedFixedOrdered
 	if chunkHeader.remainingSlots > 0 {
 		FixedOrderedListInsertAtUnsafe(chunk, chunkLocalIdx, value)
 		chunkHeader.remainingSlots--
+		segmentedList.globalLengthElements++
 		// Unsafe because the invariants guarantee that the chunkLocalIdx is between 0 and chunk capacity.
 		return nil
 	} else {
@@ -211,6 +223,7 @@ func SegmentedFixedOrderedListInsertUnsafe[T any](segmentedList *SegmentedFixedO
 	if chunkHeader.remainingSlots > 0 {
 		FixedOrderedListInsertAtUnsafe(chunk, chunkLocalIdx, value)
 		chunkHeader.remainingSlots--
+		segmentedList.globalLengthElements++
 		return
 	}
 
@@ -252,15 +265,16 @@ func SegmentedFixedOrderedListInsertUnsafe[T any](segmentedList *SegmentedFixedO
 //   - Each chunk maintains continuous order.
 //   - Total number of elements remains consistent across the structure.
 func SegmentedFixedOrderedListDelete[T any](segmentedList *SegmentedFixedOrderedList[T], idx uint64) error {
+	if err := segmentedFixedListGuaranteeIdxReadValidity(segmentedList, idx); err != nil {
+		return nil
+	}
+
 	chunkAmount := ArrayCapacityGet(segmentedList.chunkHeaders)
 	if chunkAmount == 0 {
 		return fmt.Errorf("cannot delete from empty segmented list")
 	}
 
 	chunkIdx := idx >> chunkBitShiftAmount
-	if chunkIdx >= chunkAmount {
-		return fmt.Errorf("delete: global index %v out of bounds", idx)
-	}
 
 	chunkLocalIdx := idx & chunkBitAndAmount
 	chunk := segmentedList.chunks[chunkIdx]
@@ -277,6 +291,7 @@ func SegmentedFixedOrderedListDelete[T any](segmentedList *SegmentedFixedOrdered
 	// Perform local deletion
 	FixedOrderedListDeleteUnsafe(chunk, chunkLocalIdx)
 	chunkHeader.remainingSlots++
+	segmentedList.globalLengthElements--
 
 	// Cascade left if needed (fill the hole)
 	if chunkIdx+1 < chunkAmount {
@@ -318,33 +333,14 @@ func SegmentedFixedOrderedListDeleteUnsafe[T any](segmentedList *SegmentedFixedO
 
 	FixedOrderedListDeleteUnsafe(chunk, chunkLocalIdx)
 	chunkHeader.remainingSlots++
+	segmentedList.globalLengthElements--
 
 	// If this chunk is now partially empty, we can optionally balance
 	segmentedFixedOrderedListHandleLeftCascadeUnsafe(segmentedList, chunkIdx, chunkHeader)
 }
 
-func SegmentedFixedOrderedListSetAt[T any](seg *SegmentedFixedOrderedList[T], idx uint64, value T) error {
-	chunkIdx := idx >> chunkBitShiftAmount
-	if chunkIdx >= ArrayCapacityGet(seg.chunkHeaders) {
-		return fmt.Errorf("set: idx %v out of bounds", idx)
-	}
-	localIdx := idx & chunkBitAndAmount
-	return FixedOrderedListSetAt(seg.chunks[chunkIdx], localIdx, value)
-}
-
-func SegmentedFixedOrderedListSetAtUnsafe[T any](seg *SegmentedFixedOrderedList[T], idx uint64, value T) {
-	chunkIdx := idx >> chunkBitShiftAmount
-	localIdx := idx & chunkBitAndAmount
-	FixedOrderedListSetAtUnsafe(seg.chunks[chunkIdx], localIdx, value)
-}
-
 func SegmentedFixedOrderedListLengthGet[T any](seg *SegmentedFixedOrderedList[T]) uint64 {
-	var total uint64
-	chunks := ArrayCapacityGet(seg.chunkHeaders)
-	for i := uint64(0); i < chunks; i++ {
-		total += chunkSizeElements - uint64(ArrayItemGetAtUnsafe(seg.chunkHeaders, i).remainingSlots)
-	}
-	return total
+	return seg.globalLengthElements
 }
 
 func SegmentedFixedOrderedListCapacityGet[T any](seg *SegmentedFixedOrderedList[T]) uint64 {
@@ -354,10 +350,12 @@ func SegmentedFixedOrderedListCapacityGet[T any](seg *SegmentedFixedOrderedList[
 // SegmentedFixedOrderedListItemGetAt returns the value at a given global index.
 func SegmentedFixedOrderedListItemGetAt[T any](seg *SegmentedFixedOrderedList[T], idx uint64) (T, error) {
 	chunkIdx := idx >> chunkBitShiftAmount
-	if chunkIdx >= ArrayCapacityGet(seg.chunkHeaders) {
+
+	if err := segmentedFixedListGuaranteeIdxReadValidity(seg, idx); err != nil {
 		var zero T
-		return zero, fmt.Errorf("get: idx %v out of bounds", idx)
+		return zero, err
 	}
+
 	localIdx := idx & chunkBitAndAmount
 	chunk := seg.chunks[chunkIdx]
 	return FixedOrderedListItemGetAt(chunk, localIdx)
@@ -373,8 +371,8 @@ func SegmentedFixedOrderedListItemGetAtUnsafe[T any](seg *SegmentedFixedOrderedL
 // SegmentedFixedOrderedListItemPtrGetAt returns a pointer to the value at a given global index.
 func SegmentedFixedOrderedListItemPtrGetAt[T any](seg *SegmentedFixedOrderedList[T], idx uint64) (*T, error) {
 	chunkIdx := idx >> chunkBitShiftAmount
-	if chunkIdx >= ArrayCapacityGet(seg.chunkHeaders) {
-		return nil, fmt.Errorf("ptr-get: idx %v out of bounds", idx)
+	if err := segmentedFixedListGuaranteeIdxReadValidity(seg, idx); err != nil {
+		return nil, err
 	}
 	localIdx := idx & chunkBitAndAmount
 	chunk := seg.chunks[chunkIdx]
@@ -399,7 +397,7 @@ func SegmentedFixedOrderedListItemPtrGetAtUnsafe[T any](seg *SegmentedFixedOrder
 //go:nosplit
 //go:inline
 func SegmentedFixedOrderedListBinarySearch[T any](seg *SegmentedFixedOrderedList[T], predicate func(item T) int8) (uint64, error) {
-	chunkAmount := ArrayCapacityGet(seg.chunkHeaders)
+	chunkAmount := segmentedFixedOrderedListActiveChunkCount(seg)
 	if chunkAmount == 0 {
 		return 0, fmt.Errorf("empty segmented list")
 	}
@@ -450,7 +448,7 @@ func SegmentedFixedOrderedListBinarySearch[T any](seg *SegmentedFixedOrderedList
 //go:nosplit
 //go:inline
 func SegmentedFixedOrderedListBinarySearchInterval[T any](seg *SegmentedFixedOrderedList[T], predicate func(item T) int8) (uint64, uint64) {
-	chunkAmount := ArrayCapacityGet(seg.chunkHeaders)
+	chunkAmount := segmentedFixedOrderedListActiveChunkCount(seg)
 	if chunkAmount == 0 {
 		return ^uint64(0), 0
 	}
@@ -502,8 +500,9 @@ func SegmentedFixedOrderedListBinarySearchInterval[T any](seg *SegmentedFixedOrd
 	case chunkAmount:
 		lastChunk := seg.chunks[chunkAmount-1]
 		lastLen := FixedOrderedListLengthGet(lastChunk)
-		return chunkAmount*chunkSizeElements - (chunkSizeElements - lastLen) - 1,
-			chunkAmount * chunkSizeElements
+		prev := (chunkAmount-1)*chunkSizeElements + (lastLen - 1)
+		next := (chunkAmount-1)*chunkSizeElements + lastLen
+		return prev, next
 	default:
 		prevChunk := seg.chunks[loChunk-1]
 		prevLen := FixedOrderedListLengthGet(prevChunk)
@@ -521,7 +520,7 @@ func SegmentedFixedOrderedListBinarySearchInterval[T any](seg *SegmentedFixedOrd
 //
 //go:nosplit
 func SegmentedFixedOrderedListBinarySearchInsertionPoint[T any](seg *SegmentedFixedOrderedList[T], predicate func(item T) int8) uint64 {
-	chunkAmount := ArrayCapacityGet(seg.chunkHeaders)
+	chunkAmount := segmentedFixedOrderedListActiveChunkCount(seg)
 	if chunkAmount == 0 {
 		return 0
 	}
@@ -530,6 +529,14 @@ func SegmentedFixedOrderedListBinarySearchInsertionPoint[T any](seg *SegmentedFi
 		return 0
 	}
 	return nextIdx
+}
+
+// SegmentedFixedOrderedListIsIdxValid checks whether the given global index
+// refers to a currently valid (initialized) element.
+//
+//go:inline
+func SegmentedFixedOrderedListIsIdxValid[T any](seg *SegmentedFixedOrderedList[T], idx uint64) bool {
+	return idx < seg.globalLengthElements
 }
 
 // -------------------------------------------------- Private helpers
@@ -541,8 +548,10 @@ func segmentedFixedOrderedListHandleCascade[T any](
 	chunkAmount uint64, incomingElement T,
 ) error {
 	nextChunkIdx := targetChunkIdx + 1
-	if nextChunkIdx >= chunkAmount {
-		return fmt.Errorf("cannot insert, no space to the right of insertion")
+	nextGlobalStart := nextChunkIdx * chunkSizeElements
+
+	if err := segmentedFixedListGuaranteeIdxReadValidity(segmentedList, nextGlobalStart); err != nil {
+		return err
 	}
 
 	nextChunk := segmentedList.chunks[nextChunkIdx]
@@ -685,4 +694,34 @@ func segmentedFixedOrderedListChunkHeaderArrayBytes(chunkAmount uint64) uint64 {
 	)
 
 	return chunkHeadersSize
+}
+
+//go:inline
+func segmentedFixedListGuaranteeIdxInsertionValidity[T any](fixedList *SegmentedFixedOrderedList[T], idx uint64) error {
+	if idx >= fixedList.globalCapacityElements {
+		return fmt.Errorf("index %v out of bounds: capacity %v", idx, fixedList.globalCapacityElements)
+	}
+	if idx > fixedList.globalLengthElements {
+		return fmt.Errorf("invalid index: %v, must be between 0 and %v (inclusive)", idx, fixedList.globalLengthElements)
+	}
+
+	return nil
+}
+
+//go:inline
+func segmentedFixedListGuaranteeIdxReadValidity[T any](fixedList *SegmentedFixedOrderedList[T], idx uint64) error {
+	if idx >= fixedList.globalLengthElements {
+		return fmt.Errorf("invalid index: %v, must be between 0 and %v (exclusive)", idx, fixedList.globalLengthElements)
+	}
+
+	return nil
+}
+
+//go:inline
+func segmentedFixedOrderedListActiveChunkCount[T any](seg *SegmentedFixedOrderedList[T]) uint64 {
+	active := (seg.globalLengthElements + chunkSizeElements - 1) >> chunkBitShiftAmount
+	if active == 0 {
+		active = 1
+	}
+	return active
 }
