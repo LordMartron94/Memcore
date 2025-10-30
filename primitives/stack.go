@@ -64,12 +64,9 @@ func StackPop[T any](instance *Stack[T]) (T, error) {
 		return zero, fmt.Errorf("stack underflow: stack empty")
 	}
 
-	if item, err := ArrayItemGetAt(instance.data, instance.length-1); err != nil {
-		return item, err
-	} else {
-		instance.length--
-		return item, nil
-	}
+	item := ArrayItemGetAtUnsafe(instance.data, instance.length-1)
+	instance.length--
+	return item, nil
 }
 
 // StackPopUnsafe retrieves an element from the stack.
