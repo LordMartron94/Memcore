@@ -67,6 +67,43 @@ func ArrayCreateAt[T any](addr unsafe.Pointer, capacity uint64) *Array[T] {
 	return array
 }
 
+// ArraySnapshotCreate creates a snapshot of the current array instance.
+// It functions as a deep copy.
+func ArraySnapshotCreate[T any](addr unsafe.Pointer, instance *Array[T]) *Array[T] {
+	if uintptr(addr)%uintptr(memcore.AlignOf[T]()) != 0 {
+		panic(fmt.Sprintf("unaligned snapshot address: %p (align=%d)", addr, memcore.AlignOf[T]()))
+	}
+
+	srcPtr := arrayGetPtrAtIdx(instance, 0)
+	memcore.MemoryMoveNoHeapPointers(addr, srcPtr, instance.itemSizeUintPtr*uintptr(instance.capacity))
+
+	return &Array[T]{
+		ptr:             addr,
+		capacity:        instance.capacity,
+		itemSize:        instance.itemSize,
+		itemSizeUintPtr: instance.itemSizeUintPtr,
+	}
+}
+
+// ArraySnapshotRestore replaces the internal data of the current instance with the data from the given array.
+// Useful when you want to re-use snapshots or configurations.
+func ArraySnapshotRestore[T any](instance *Array[T], data *Array[T]) error {
+	if instance.capacity != data.capacity {
+		return fmt.Errorf("cannot replace array data with unequal capacities (current=%v,given=%v)", instance.capacity, data.capacity)
+	}
+
+	if instance.ptr == data.ptr {
+		return nil
+	}
+
+	srcPtr := arrayGetPtrAtIdx(data, 0)
+	dstPtr := arrayGetPtrAtIdx(instance, 0)
+
+	memcore.MemoryMoveNoHeapPointers(dstPtr, srcPtr, instance.itemSizeUintPtr*uintptr(instance.capacity))
+
+	return nil
+}
+
 // ArrayCapacityGet returns the total amount of elements that can be stored.
 //
 //go:nosplit

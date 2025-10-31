@@ -9,9 +9,10 @@ import (
 // FixedOrderedList is a list of fixed size.
 // It uses an array under the hood but enforces sequential semantics.
 type FixedOrderedList[T any] struct {
-	dataArray *Array[T]
-	indices   *Array[uint64]
-	freeList  *Stack[uint64]
+	dataArray        *Array[T]
+	indices          *Array[uint64]
+	freeList         *Stack[uint64]
+	freeListSnapshot *Stack[uint64]
 
 	length   uint64
 	capacity uint64
@@ -31,7 +32,7 @@ func FixedOrderedListRequiredBytes[T any](capacity uint64) uint64 {
 		capacity*memcore.SizeOf[uint64](),
 		memcore.AlignOf[uint64](),
 	)
-	return sizeData + sizeIndices + sizeFreelist
+	return sizeData + sizeIndices + sizeFreelist + sizeFreelist // sizeFreeList twice for a snapshot.
 }
 
 // FixedOrderedListCreateAt creates an instance of a fixed list for type T at a specific memory address.
@@ -57,7 +58,8 @@ func FixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacity uint64) *Fixe
 	// --- derive subaddresses
 	indicesAddr := addr
 	freeListAddr := unsafe.Add(indicesAddr, sizeIndices)
-	dataAddr := unsafe.Add(freeListAddr, sizeFreelist)
+	snapshotAddr := unsafe.Add(freeListAddr, sizeFreelist)
+	dataAddr := unsafe.Add(snapshotAddr, sizeFreelist)
 
 	// --- build subcontainers
 	indices := ArrayCreateAt[uint64](indicesAddr, capacity)
@@ -69,12 +71,15 @@ func FixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacity uint64) *Fixe
 		StackPushUnsafe(freeList, i)
 	}
 
+	freeListSnapshot := StackSnapshotCreate(snapshotAddr, freeList)
+
 	return &FixedOrderedList[T]{
-		dataArray: data,
-		indices:   indices,
-		freeList:  freeList,
-		length:    0,
-		capacity:  capacity,
+		dataArray:        data,
+		indices:          indices,
+		freeList:         freeList,
+		freeListSnapshot: freeListSnapshot,
+		length:           0,
+		capacity:         capacity,
 	}
 }
 
@@ -178,7 +183,7 @@ func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64,
 	if err := fixedListGuaranteeIdxInsertionValidity(fixedList, idx); err != nil {
 		return err
 	}
-	if fixedList.length >= fixedList.dataArray.capacity {
+	if fixedList.length >= fixedList.capacity {
 		return fmt.Errorf("no space left in fixed list, capacity reached")
 	}
 
@@ -350,12 +355,8 @@ func FixedOrderedListBinarySearchInsertionPoint[T any](fixedList *FixedOrderedLi
 //
 //go:inline
 func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
+	StackSnapshotRestore(fixedList.freeList, fixedList.freeListSnapshot)
 	fixedList.length = 0
-	StackClear(fixedList.freeList)
-
-	for i := uint64(0); i < fixedList.capacity; i++ {
-		StackPushUnsafe(fixedList.freeList, i)
-	}
 }
 
 // FixedOrderedListClearAndZero resets the list to allow for reuse.
@@ -366,11 +367,7 @@ func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
 //go:inline
 func FixedOrderedListClearAndZero[T any](fixedList *FixedOrderedList[T]) {
 	ArrayClear(fixedList.dataArray)
-	StackClearAndZero(fixedList.freeList)
-
-	for i := uint64(0); i < fixedList.capacity; i++ {
-		StackPushUnsafe(fixedList.freeList, i)
-	}
+	StackSnapshotRestore(fixedList.freeList, fixedList.freeListSnapshot)
 
 	fixedList.length = 0
 }

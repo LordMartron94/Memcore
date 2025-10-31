@@ -2,13 +2,6 @@ package memcore
 
 import "unsafe"
 
-const (
-	// Based on empirical benchmark results:
-	// - Manual byte copy only wins below ~8 bytes.
-	// - Above that, runtime.memmove is much faster (2–10×).
-	manualMoveThreshold uintptr = 8
-)
-
 // MemoryMoveNoHeapPointers copies n bytes between two regions known to
 // contain no Go heap pointers. It automatically selects the optimal path
 // for size and overlap safety.
