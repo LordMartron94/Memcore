@@ -430,7 +430,7 @@ func fixedListGuaranteeIdxInsertionValidity[T any](fixedList *FixedOrderedList[T
 		return fmt.Errorf("index %v out of bounds: capacity %v", idx, fixedList.capacity)
 	}
 	if idx > fixedList.length {
-		return fmt.Errorf("invalid index: %v, must be between 0 and %v (inclusive)", idx, fixedList.length)
+		return fmt.Errorf("[fixed ordered list] insertion index %v invalid: must be between 0 and %v (inclusive)", idx, fixedList.length)
 	}
 
 	return nil
@@ -439,7 +439,8 @@ func fixedListGuaranteeIdxInsertionValidity[T any](fixedList *FixedOrderedList[T
 //go:inline
 func fixedListGuaranteeIdxReadValidity[T any](fixedList *FixedOrderedList[T], idx uint64) error {
 	if idx >= fixedList.length {
-		return fmt.Errorf("invalid index: %v, must be between 0 and %v (exclusive)", idx, fixedList.length)
+		return fmt.Errorf("[fixed ordered list] read index %v invalid: must be between 0 and %v (exclusive)", idx, fixedList.length)
+
 	}
 
 	return nil
