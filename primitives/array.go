@@ -20,6 +20,16 @@ func setByAssign[T any](array *Array[T], idx uint64, value T) {
 	*(*T)(currentPtr) = value
 }
 
+func ArrayRequiredBytesGet[T any](capacity uint64) uint64 {
+	itemSize := memcore.SizeOf[T]()
+	itemAlignment := memcore.AlignOf[T]()
+	return alignIdxUp(itemSize*capacity, itemAlignment)
+}
+
+func ArrayRequiredAlignmentGet[T any]() uint64 {
+	return memcore.AlignOf[T]()
+}
+
 // Array is a custom array implementation build on top of the custom allocators.
 // It contains an unsafe Pointer internally and therefore can NOT be stored in custom allocated memory.
 type Array[T any] struct {

@@ -13,6 +13,14 @@ type Stack[T any] struct {
 	capacity uint64
 }
 
+func StackRequiredBytesGet[T any](capacity uint64) uint64 {
+	return ArrayRequiredBytesGet[T](capacity)
+}
+
+func StackRequiredAlignmentGet[T any]() uint64 {
+	return ArrayRequiredAlignmentGet[T]()
+}
+
 // StackCreateAt creates an instance of a stack for type T at a specific memory address.
 // Ensure the address is properly aligned and has the right size.
 //

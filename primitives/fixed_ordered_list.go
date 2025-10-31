@@ -20,19 +20,15 @@ type FixedOrderedList[T any] struct {
 
 // FixedOrderedListRequiredBytes computes the necessary amount of bytes for the fixed list.
 func FixedOrderedListRequiredBytes[T any](capacity uint64) uint64 {
-	sizeData := alignIdxUp(
-		capacity*memcore.SizeOf[T](),
-		memcore.AlignOf[T](),
-	)
-	sizeIndices := alignIdxUp(
-		capacity*memcore.SizeOf[uint64](),
-		memcore.AlignOf[uint64](),
-	)
-	sizeFreelist := alignIdxUp(
-		capacity*memcore.SizeOf[uint64](),
-		memcore.AlignOf[uint64](),
-	)
+	sizeData := ArrayRequiredBytesGet[T](capacity)
+	sizeIndices := ArrayRequiredBytesGet[uint64](capacity)
+	sizeFreelist := StackRequiredBytesGet[T](capacity)
 	return sizeData + sizeIndices + sizeFreelist + sizeFreelist // sizeFreeList twice for a snapshot.
+}
+
+// FixedOrderedListRequiredAlignment returns the alignment necessary for the free list.
+func FixedOrderedListRequiredAlignment[T any]() uint64 {
+	return max(memcore.AlignOf[T](), memcore.AlignOf[uint64]())
 }
 
 // FixedOrderedListCreateAt creates an instance of a fixed list for type T at a specific memory address.
