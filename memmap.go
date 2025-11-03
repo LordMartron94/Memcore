@@ -46,6 +46,10 @@ func MemmapRemap(memmap MemoryMap, newSize int, flags MemoryRemapFlag) (MemoryMa
 	return platformMemmapRemap(memmap, newSize, flags)
 }
 
+func MemmapRemapAt(addr unsafe.Pointer, oldSize, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
+	return platformMemmapRemapAt(addr, oldSize, newSize, flags)
+}
+
 func MemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (unsafe.Pointer, error) {
 	return platformMemmapRequestAt(addr, byteAmount, protection, flags)
 }

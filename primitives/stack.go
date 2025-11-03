@@ -2,167 +2,195 @@ package primitives
 
 import (
 	"fmt"
-	"unsafe"
+	"memcore"
 )
 
-// Stack is a custom stack implementation build on top of the array primitive.
-// It contains an unsafe Pointer internally and therefore can NOT be stored in custom allocated memory.
+// Stack is a custom stack implementation built on top of the array primitive.
 type Stack[T any] struct {
-	data     *Array[T]
+	data     memcore.Pointer
 	length   uint64
 	capacity uint64
 }
 
+// StackRequiredBytesGet returns total bytes required for a stack of given capacity.
 func StackRequiredBytesGet[T any](capacity uint64) uint64 {
-	return ArrayRequiredBytesGet[T](capacity)
+	stackHeaderSize := memcore.SizeOf[Stack[T]]()
+	stackHeaderAlignment := memcore.AlignOf[Stack[T]]()
+	stackHeaderTotalSize := alignIdxUp(stackHeaderSize, stackHeaderAlignment)
+
+	return stackHeaderTotalSize + ArrayRequiredBytesGet[T](capacity)
 }
 
+// StackRequiredAlignmentGet returns alignment requirement for the stack type.
 func StackRequiredAlignmentGet[T any]() uint64 {
-	return ArrayRequiredAlignmentGet[T]()
+	return max(memcore.AlignOf[Stack[T]](), ArrayRequiredAlignmentGet[T]())
 }
 
-// StackCreateAt creates an instance of a stack for type T at a specific memory address.
+// StackInitializeAt initializes an instance of a stack for type T at a specific memory address.
 // Ensure the address is properly aligned and has the right size.
 //
 // ⚠️ capacity is in elements, not bytes.
-// When using memory returned from a byte allocator,
-// convert using: capacity = bytes / memcore.SizeOf[T]()
-//
-// ⚠️ Important: Do NOT allocate this struct itself inside manually-managed memory.
-// The struct contains Go pointers and must remain
-// visible to the Go garbage collector.
-//
-// You may, however, point its internal data (the `ptr` field) to memory that was
-// manually allocated (e.g. via mmap or a custom allocator). In other words:
-//
-//	✅ Safe:   header on Go heap, data in manual memory
-//	❌ Unsafe: header and data both in manual memory
-func StackCreateAt[T any](addr unsafe.Pointer, capacity uint64) *Stack[T] {
-	array := ArrayCreateAt[T](addr, capacity)
+func StackInitializeAt[T any](stackAddr memcore.Pointer, capacity uint64) {
+	stackHeaderSize := memcore.SizeOf[Stack[T]]()
+	stackHeaderAlignment := memcore.AlignOf[Stack[T]]()
+	arrayHeaderOffset := alignIdxUp(uint64(memcore.PointerOffset(stackAddr))+stackHeaderSize, stackHeaderAlignment)
 
-	return &Stack[T]{
-		data:     array,
+	// Create pointer for nested array header
+	arrayPtr := memcore.MemcorePointerCreate(
+		memcore.PointerAddressSpace(stackAddr),
+		uintptr(arrayHeaderOffset),
+		memcore.TypeOf[Array[T]](),
+	)
+
+	// Register sub-pointer for dereferencing
+	memcore.MemcorePointerRegister(arrayPtr)
+
+	// Initialize array header + data region
+	ArrayInitializeAt[T](arrayPtr, capacity)
+
+	// Initialize stack header itself
+	stackPtr := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stackAddr)
+	*stackPtr = Stack[T]{
+		data:     arrayPtr,
 		length:   0,
 		capacity: capacity,
 	}
 }
 
-// StackSnapshotCreate creates a snapshot you can use to restore later.
-func StackSnapshotCreate[T any](addr unsafe.Pointer, instance *Stack[T]) *Stack[T] {
-	arraySnapshot := ArraySnapshotCreate(addr, instance.data)
-	return &Stack[T]{
-		data:     arraySnapshot,
-		length:   instance.length,
-		capacity: instance.capacity,
-	}
-}
-
-// StackSnapshotRestore overwrites the current stack instance with a snapshot.
-// This serves as a more efficient reset when you want to use a certain configuration again.
-func StackSnapshotRestore[T any](instance *Stack[T], snapshot *Stack[T]) {
-	if instance.capacity != snapshot.capacity {
-		panic(fmt.Errorf("instance capacity (%v) is unequal to snapshot capacity (%v)", instance.capacity, snapshot.capacity))
-	}
-
-	instance.length = snapshot.length
-	ArraySnapshotRestore(instance.data, snapshot.data)
-}
-
-// StackPush pushes an item into the stack and does boundary validation.
+// StackDestroy cleans up the stack.
 //
 //go:inline
 //go:nosplit
-func StackPush[T any](instance *Stack[T], item T) error {
-	if instance.length >= ArrayCapacityGet(instance.data) {
-		return fmt.Errorf("stack overflow: capacity %d", ArrayCapacityGet(instance.data))
+func StackDestroy[T any](stackAddr memcore.Pointer) {
+	stackPtr := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stackAddr)
+	memcore.MemcorePointerUnregister(stackPtr.data)
+}
+
+// StackSnapshotCreate creates a deep snapshot of a stack at a new location.
+func StackSnapshotCreate[T any](dest memcore.Pointer, instance memcore.Pointer) memcore.Pointer {
+	src := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](instance)
+	totalSize := StackRequiredBytesGet[T](src.capacity)
+
+	srcAddr := memcore.MemcorePointerDereferenceRaw(instance)
+	dstAddr := memcore.MemcorePointerDereferenceRaw(dest)
+	memcore.MemoryMoveNoHeapPointers(dstAddr, srcAddr, uintptr(totalSize))
+
+	return dest
+}
+
+// StackSnapshotRestore replaces the contents of one stack with another.
+func StackSnapshotRestore[T any](dest memcore.Pointer, src memcore.Pointer) {
+	dstStack := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](dest)
+	srcStack := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](src)
+
+	if dstStack.capacity != srcStack.capacity {
+		panic(fmt.Errorf("cannot restore stack snapshot: unequal capacities (%v vs %v)", dstStack.capacity, srcStack.capacity))
+	}
+
+	ArraySnapshotRestore[T](dstStack.data, srcStack.data)
+	dstStack.length = srcStack.length
+}
+
+// StackPush pushes an item into the stack.
+//
+//go:inline
+//go:nosplit
+func StackPush[T any](stack memcore.Pointer, item T) error {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
+
+	if instance.length >= instance.capacity {
+		return fmt.Errorf("stack overflow: capacity %d", instance.capacity)
 	}
 
 	ArraySetAtUnsafe(instance.data, instance.length, item)
-
 	instance.length++
 	return nil
 }
 
-// StackPushUnsafe pushes an item into the stack.
-// It does not validate boundaries.
+// StackPushUnsafe pushes an item without boundary checks.
 //
 //go:inline
 //go:nosplit
-func StackPushUnsafe[T any](instance *Stack[T], item T) {
+func StackPushUnsafe[T any](stack memcore.Pointer, item T) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
 	ArraySetAtUnsafe(instance.data, instance.length, item)
-
 	instance.length++
 }
 
-// StackPop retrieves an element from the stack while performing boundary validation.
+// StackPop pops the top element with bounds checking.
 //
 //go:inline
 //go:nosplit
-func StackPop[T any](instance *Stack[T]) (T, error) {
+func StackPop[T any](stack memcore.Pointer) (T, error) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
 	if instance.length == 0 {
 		var zero T
-		return zero, fmt.Errorf("stack underflow: stack empty")
+		return zero, fmt.Errorf("stack underflow: empty stack")
 	}
 
-	item := ArrayItemGetAtUnsafe(instance.data, instance.length-1)
+	item := ArrayItemGetAtUnsafe[T](instance.data, instance.length-1)
 	instance.length--
 	return item, nil
 }
 
-// StackPopUnsafe retrieves an element from the stack.
-// It does not validate boundaries.
+// StackPopUnsafe pops without bounds checking.
 //
 //go:inline
 //go:nosplit
-func StackPopUnsafe[T any](instance *Stack[T]) T {
-	item := ArrayItemGetAtUnsafe(instance.data, instance.length-1)
+func StackPopUnsafe[T any](stack memcore.Pointer) T {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
+	item := ArrayItemGetAtUnsafe[T](instance.data, instance.length-1)
 	instance.length--
 	return item
 }
 
-// StackPeek peeks at the last pushed item while validating boundaries.
+// StackPeek returns the top element without removing it.
 //
 //go:inline
 //go:nosplit
-func StackPeek[T any](instance *Stack[T]) (T, error) {
-	if item, err := ArrayItemGetAt(instance.data, instance.length-1); err != nil {
-		return item, err
-	} else {
-		return item, nil
+func StackPeek[T any](stack memcore.Pointer) (T, error) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
+	if instance.length == 0 {
+		var zero T
+		return zero, fmt.Errorf("stack empty")
 	}
+
+	return ArrayItemGetAtUnsafe[T](instance.data, instance.length-1), nil
 }
 
-// StackPeekUnsafe peeks at the last pushed item.
-// It does not validate boundaries.
+// StackPeekUnsafe peeks without bounds checking.
 //
 //go:inline
 //go:nosplit
-func StackPeekUnsafe[T any](instance *Stack[T]) T {
-	item := ArrayItemGetAtUnsafe(instance.data, instance.length-1)
-	return item
+func StackPeekUnsafe[T any](stack memcore.Pointer) T {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
+	return ArrayItemGetAtUnsafe[T](instance.data, instance.length-1)
 }
 
-// StackClear clears the stack, allowing for reuse.
-// It does NOT zero the memory.
+// StackClear resets logical length only (does not zero memory).
 //
 //go:inline
 //go:nosplit
-func StackClear[T any](instance *Stack[T]) {
+func StackClear[T any](stack memcore.Pointer) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
 	instance.length = 0
 }
 
-// StackClearAndZero clears the stack, allowing for reuse.
-// It does zero the memory.
+// StackClearAndZero resets logical length and zeroes array memory.
 //
 //go:inline
 //go:nosplit
-func StackClearAndZero[T any](instance *Stack[T]) {
-	ArrayClear(instance.data)
+func StackClearAndZero[T any](stack memcore.Pointer) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
+	ArrayClear[T](instance.data)
 	instance.length = 0
 }
 
+// StackIsEmpty checks if stack is empty.
+//
 //go:inline
 //go:nosplit
-func StackIsEmpty[T any](instance *Stack[T]) bool {
+func StackIsEmpty[T any](stack memcore.Pointer) bool {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Stack[T]](stack)
 	return instance.length == 0
 }

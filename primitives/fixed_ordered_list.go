@@ -3,274 +3,311 @@ package primitives
 import (
 	"fmt"
 	"memcore"
-	"unsafe"
 )
 
-// FixedOrderedList is a list of fixed size.
-// It uses an array under the hood but enforces sequential semantics.
-type FixedOrderedList[T any] struct {
-	dataArray        *Array[T]
-	indices          *Array[uint64]
-	freeList         *Stack[uint64]
-	freeListSnapshot *Stack[uint64]
+//
+// ────────────────────────────────────────────────────────────────────────────────
+//   STRUCTURE OVERVIEW
+// ────────────────────────────────────────────────────────────────────────────────
+//
+// FixedOrderedList[T] is a manually managed, fixed-capacity sequential list
+// built on top of Array[T] and Stack[uint64] primitives.
+//
+// Each element is stored in a contiguous Array[T], but logical ordering is
+// maintained via an Array[uint64] index table. A freelist Stack[uint64] holds
+// all unused slots, allowing O(1) slot reuse without heap allocations.
+//
+// All internal substructures (arrays, stacks, snapshots) live inside the same
+// memcore namespace. Consequently, the list is fully relocatable and can be
+// snapshotted or restored purely through pointer-offset reconstruction.
+//
+// The struct itself does not contain Go pointers and is therefore safe to
+// allocate in manually managed memory, provided all subpointers are registered
+// in memcore before initialization.
+//
 
-	length   uint64
-	capacity uint64
+// FixedOrderedList is a relocatable, manually-managed sequential container.
+type FixedOrderedList[T any] struct {
+	dataArray        memcore.Pointer // Array[T]
+	indices          memcore.Pointer // Array[uint64]
+	freeList         memcore.Pointer // Stack[uint64]
+	freeListSnapshot memcore.Pointer // Stack[uint64]
+
+	length   uint64 // number of logically occupied slots
+	capacity uint64 // total available slots
 }
 
-// FixedOrderedListRequiredBytes computes the necessary amount of bytes for the fixed list.
+//
+// ────────────────────────────────────────────────────────────────────────────────
+//   SIZE & ALIGNMENT
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+// FixedOrderedListRequiredBytes returns the total number of bytes required to
+// store a FixedOrderedList[T] with a given element capacity.
+//
+// The calculation includes:
+//   - One Array[T] data store
+//   - One Array[uint64] index table
+//   - Two Stack[uint64] freelists (active + snapshot)
+//   - Header
+//
+// Use this function to determine how much manual memory must be allocated
+// prior to calling FixedOrderedListInitializeAt.
 func FixedOrderedListRequiredBytes[T any](capacity uint64) uint64 {
 	sizeData := ArrayRequiredBytesGet[T](capacity)
 	sizeIndices := ArrayRequiredBytesGet[uint64](capacity)
-	sizeFreelist := StackRequiredBytesGet[T](capacity)
-	return sizeData + sizeIndices + sizeFreelist + sizeFreelist // sizeFreeList twice for a snapshot.
+	sizeFreelist := StackRequiredBytesGet[uint64](capacity)
+	return sizeData + sizeIndices + sizeFreelist + sizeFreelist + memcore.SizeOf[FixedOrderedList[T]]()
 }
 
-// FixedOrderedListRequiredAlignment returns the alignment necessary for the free list.
+// FixedOrderedListRequiredAlignment returns the maximum alignment constraint
+// among all internal components (data array, indices, stacks).
 func FixedOrderedListRequiredAlignment[T any]() uint64 {
-	return max(memcore.AlignOf[T](), memcore.AlignOf[uint64]())
+	return max(
+		ArrayRequiredAlignmentGet[T](),
+		ArrayRequiredAlignmentGet[uint64](),
+		StackRequiredAlignmentGet[uint64](),
+		memcore.AlignOf[FixedOrderedList[T]](),
+	)
 }
 
-// FixedOrderedListCreateAt creates an instance of a fixed list for type T at a specific memory address.
-// Ensure the address is properly aligned and has the right size (call FixedOrderedListRequiredBytes to compute).
 //
-// ⚠️ capacity is in elements, not bytes.
-// When using memory returned from a byte allocator,
-// convert using: capacity = bytes / memcore.SizeOf[T]()
+// ────────────────────────────────────────────────────────────────────────────────
+//   INITIALIZATION / DESTRUCTION
+// ────────────────────────────────────────────────────────────────────────────────
 //
-// ⚠️ Important: Do NOT allocate this struct itself inside manually-managed memory.
-// The struct contains Go pointers and must remain
-// visible to the Go garbage collector.
-//
-// You may, however, point its internal data (the `ptr` field) to memory that was
-// manually allocated (e.g. via mmap or a custom allocator). In other words:
-//
-//	✅ Safe:   header on Go heap, data in manual memory
-//	❌ Unsafe: header and data both in manual memory
-func FixedOrderedListCreateAt[T any](addr unsafe.Pointer, capacity uint64) *FixedOrderedList[T] {
-	sizeIndices := alignIdxUp(capacity*memcore.SizeOf[uint64](), memcore.AlignOf[uint64]())
-	sizeFreelist := alignIdxUp(capacity*memcore.SizeOf[uint64](), memcore.AlignOf[uint64]())
 
-	// --- derive subaddresses
-	indicesAddr := addr
-	freeListAddr := unsafe.Add(indicesAddr, sizeIndices)
-	snapshotAddr := unsafe.Add(freeListAddr, sizeFreelist)
-	dataAddr := unsafe.Add(snapshotAddr, sizeFreelist)
+// FixedOrderedListInitializeAt constructs a FixedOrderedList[T] header and
+// initializes its subcomponents in a pre-allocated, manually managed region.
+//
+// Preconditions:
+//   - The memory region referenced by listAddr must belong to a registered
+//     memcore namespace.
+//   - The region must have at least FixedOrderedListRequiredBytes[T](capacity)
+//     bytes available and satisfy FixedOrderedListRequiredAlignment[T].
+//
+// The function creates and registers four internal pointers within the same
+// namespace (indices, freeList, freeListSnapshot, and dataArray), initializes
+// all of them, fills the freelist, and snapshots it for future resets.
+//
+// Capacity is expressed in number of elements, not bytes.
+func FixedOrderedListInitializeAt[T any](listAddr memcore.Pointer, capacity uint64) {
+	addressSpace := memcore.PointerAddressSpace(listAddr)
+	baseOffset := memcore.PointerOffset(listAddr)
 
-	// --- build subcontainers
-	indices := ArrayCreateAt[uint64](indicesAddr, capacity)
-	freeList := StackCreateAt[uint64](freeListAddr, capacity)
-	data := ArrayCreateAt[T](dataAddr, capacity)
+	// Compute offsets for internal components relative to list header
+	sizeIndices := ArrayRequiredBytesGet[uint64](capacity)
+	sizeFreelist := StackRequiredBytesGet[uint64](capacity)
+	sizeFreelistSnapshot := sizeFreelist
 
-	// --- fill freelist with all available slots
+	offsetIndices := uintptr(memcore.SizeOf[FixedOrderedList[T]]())
+	offsetFreelist := offsetIndices + uintptr(sizeIndices)
+	offsetFreelistSnapshot := offsetFreelist + uintptr(sizeFreelist)
+	offsetData := offsetFreelistSnapshot + uintptr(sizeFreelistSnapshot)
+
+	// Create subpointers within the same namespace
+	indicesPtr := memcore.MemcorePointerCreate(addressSpace, baseOffset + offsetIndices, memcore.TypeOf[Array[uint64]]())
+	freeListPtr := memcore.MemcorePointerCreate(addressSpace, baseOffset + offsetFreelist, memcore.TypeOf[Stack[uint64]]())
+	freeListSnapshotPtr := memcore.MemcorePointerCreate(addressSpace, baseOffset + offsetFreelistSnapshot, memcore.TypeOf[Stack[uint64]]())
+	dataPtr := memcore.MemcorePointerCreate(addressSpace, baseOffset + offsetData, memcore.TypeOf[Array[T]]())
+
+	memcore.MemcorePointerRegister(indicesPtr)
+	memcore.MemcorePointerUpdateType(indicesPtr, memcore.TypeOf[Array[uint64]]())
+
+	memcore.MemcorePointerRegister(freeListPtr)
+	memcore.MemcorePointerUpdateType(freeListPtr, memcore.TypeOf[Stack[uint64]]())
+
+	memcore.MemcorePointerRegister(freeListSnapshotPtr)
+	memcore.MemcorePointerUpdateType(freeListSnapshotPtr, memcore.TypeOf[Stack[uint64]]())
+
+	memcore.MemcorePointerRegister(dataPtr)
+	memcore.MemcorePointerUpdateType(dataPtr, memcore.TypeOf[Array[T]]())
+
+	// Initialize substructures
+	ArrayInitializeAt[uint64](indicesPtr, capacity)
+	StackInitializeAt[uint64](freeListPtr, capacity)
+	ArrayInitializeAt[T](dataPtr, capacity)
+
+	// Populate freelist with all slots [0, capacity)
 	for i := uint64(0); i < capacity; i++ {
-		StackPushUnsafe(freeList, i)
+		StackPushUnsafe(freeListPtr, i)
 	}
 
-	freeListSnapshot := StackSnapshotCreate(snapshotAddr, freeList)
+	// Snapshot freelist for O(1) resets
+	StackSnapshotCreate[uint64](freeListSnapshotPtr, freeListPtr)
 
-	return &FixedOrderedList[T]{
-		dataArray:        data,
-		indices:          indices,
-		freeList:         freeList,
-		freeListSnapshot: freeListSnapshot,
+	// Write header fields
+	list := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](listAddr)
+	*list = FixedOrderedList[T]{
+		dataArray:        dataPtr,
+		indices:          indicesPtr,
+		freeList:         freeListPtr,
+		freeListSnapshot: freeListSnapshotPtr,
 		length:           0,
 		capacity:         capacity,
 	}
 }
 
-// FixedOrderedListItemGetAt returns T at idx within the list.
-// It returns an error if the idx is invalid.
+// FixedOrderedListDestroy unregisters all internal pointers belonging to
+// the FixedOrderedList. It must be called before destroying the parent
+// allocator or namespace.
+func FixedOrderedListDestroy[T any](listAddr memcore.Pointer) {
+	list := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](listAddr)
+	memcore.MemcorePointerUnregister(list.dataArray)
+	memcore.MemcorePointerUnregister(list.indices)
+	memcore.MemcorePointerUnregister(list.freeList)
+	memcore.MemcorePointerUnregister(list.freeListSnapshot)
+}
+
 //
-//go:inline
-//go:nosplit
-func FixedOrderedListItemGetAt[T any](fixedList *FixedOrderedList[T], idx uint64) (T, error) {
-	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
+// ────────────────────────────────────────────────────────────────────────────────
+//   ELEMENT ACCESSORS
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+// FixedOrderedListItemGetAt retrieves the element at logical index `idx`.
+// Returns an error if `idx` is out of range.
+func FixedOrderedListItemGetAt[T any](list memcore.Pointer, idx uint64) (T, error) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	if err := fixedListGuaranteeIdxReadValidity(instance, idx); err != nil {
 		var zero T
 		return zero, err
 	}
-
-	item := fixedListGetElement(fixedList, idx)
-	return item, nil
+	return fixedListGetElement(instance, idx), nil
 }
 
-// FixedOrderedListItemGetAtUnsafe returns T at idx within the list.
-// It does no bounds checks.
-//
-//go:inline
-//go:nosplit
-func FixedOrderedListItemGetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) T {
-	return fixedListGetElement(fixedList, idx)
+// FixedOrderedListItemGetAtUnsafe retrieves an element without performing
+// any bounds checks.
+func FixedOrderedListItemGetAtUnsafe[T any](list memcore.Pointer, idx uint64) T {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	return fixedListGetElement(instance, idx)
 }
 
-// FixedOrderedListItemPtrGetAt returns a pointer to  T at idx within the list.
-// It returns an error if the idx is invalid.
-//
-// Using this pointer after deletion or overwriting this idx is undefined behaviour.
-// Use at your own discretion!
-//
-//go:inline
-//go:nosplit
-func FixedOrderedListItemPtrGetAt[T any](fixedList *FixedOrderedList[T], idx uint64) (*T, error) {
-	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
+// FixedOrderedListItemPtrGetAt returns a pointer to the element at `idx`,
+// validating that the index is within range.
+func FixedOrderedListItemPtrGetAt[T any](list memcore.Pointer, idx uint64) (*T, error) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	if err := fixedListGuaranteeIdxReadValidity(instance, idx); err != nil {
 		return nil, err
 	}
-
-	item := fixedListGetElementPtr(fixedList, idx)
-	return item, nil
+	return fixedListGetElementPtr(instance, idx), nil
 }
 
-// FixedOrderedListItemPtrGetAtUnsafe returns a pointer to T at idx within the list.
-// It does no bounds checks.
-//
-// Using this pointer after deletion or overwriting this idx is undefined behaviour.
-// Use at your own discretion!
-//
-//go:inline
-//go:nosplit
-func FixedOrderedListItemPtrGetAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) *T {
-	return fixedListGetElementPtr(fixedList, idx)
+// FixedOrderedListItemPtrGetAtUnsafe returns a pointer to the element
+// at `idx` without any safety checks.
+func FixedOrderedListItemPtrGetAtUnsafe[T any](list memcore.Pointer, idx uint64) *T {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	return fixedListGetElementPtr(instance, idx)
 }
 
-// FixedOrderedListAppend adds an item into the fixed list.
-// It returns an error if the bounds are invalid.
 //
-//go:nosplit
-//go:inline
-func FixedOrderedListAppend[T any](fixedList *FixedOrderedList[T], item T) error {
-	slot := StackPopUnsafe(fixedList.freeList)
-	ArraySetAtUnsafe(fixedList.indices, fixedList.length, slot)
+// ────────────────────────────────────────────────────────────────────────────────
+//   INSERTION & DELETION
+// ────────────────────────────────────────────────────────────────────────────────
+//
 
-	if err := ArraySetAt(fixedList.dataArray, slot, item); err != nil {
-		return err
+// FixedOrderedListAppend appends a new element to the end of the list.
+// Returns an error if the list is already full.
+func FixedOrderedListAppend[T any](list memcore.Pointer, value T) error {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	if instance.length >= instance.capacity {
+		return fmt.Errorf("fixed list full: capacity %d", instance.capacity)
 	}
-
-	fixedList.length++
-
+	slot := StackPopUnsafe[uint64](instance.freeList)
+	ArraySetAtUnsafe(instance.indices, instance.length, slot)
+	ArraySetAtUnsafe(instance.dataArray, slot, value)
+	instance.length++
 	return nil
 }
 
-// FixedOrderedListAppendUnsafe adds an item into the fixed list.
-// It does not do bounds checks.
-//
-//go:nosplit
-//go:inline
-func FixedOrderedListAppendUnsafe[T any](fixedList *FixedOrderedList[T], item T) {
-	slot := StackPopUnsafe(fixedList.freeList)
-	ArraySetAtUnsafe(fixedList.indices, fixedList.length, slot)
-	ArraySetAtUnsafe(fixedList.dataArray, slot, item)
-
-	fixedList.length++
+// FixedOrderedListAppendUnsafe appends without capacity validation.
+func FixedOrderedListAppendUnsafe[T any](list memcore.Pointer, value T) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	slot := StackPopUnsafe[uint64](instance.freeList)
+	ArraySetAtUnsafe(instance.indices, instance.length, slot)
+	ArraySetAtUnsafe(instance.dataArray, slot, value)
+	instance.length++
 }
 
-// FixedOrderedListInsertAt inserts a value T into the list at position idx,
-// shifting all elements from idx through length-1 one slot to the right
-// to make space for the new element.
-//
-// This operation runs in O(n) time since all elements after idx are moved.
-// It returns an error if:
-//   - idx is outside the valid range [0, length]
-//   - or the list has reached its fixed capacity.
-//
-// Special cases:
-//   - If the list is empty and idx == 0, the value is inserted directly without shifting.
-//   - Inserting at idx == length appends the value to the end of the list.
-func FixedOrderedListInsertAt[T any](fixedList *FixedOrderedList[T], idx uint64, value T) error {
-	if err := fixedListGuaranteeIdxInsertionValidity(fixedList, idx); err != nil {
+// FixedOrderedListInsertAt inserts a value at a given logical index, shifting
+// subsequent elements to the right. Runs in O(n) time.
+func FixedOrderedListInsertAt[T any](list memcore.Pointer, idx uint64, value T) error {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	if err := fixedListGuaranteeIdxInsertionValidity(instance, idx); err != nil {
 		return err
 	}
-	if fixedList.length >= fixedList.capacity {
-		return fmt.Errorf("no space left in fixed list, capacity reached")
+	if instance.length >= instance.capacity {
+		return fmt.Errorf("no space left in fixed list")
 	}
-
-	slot := StackPopUnsafe(fixedList.freeList)
-	ArraySetAtUnsafe(fixedList.dataArray, slot, value)
-	fixedListInsertIndex(fixedList, idx, slot)
-
-	fixedList.length++
+	slot := StackPopUnsafe[uint64](instance.freeList)
+	ArraySetAtUnsafe(instance.dataArray, slot, value)
+	fixedListInsertIndex(instance, idx, slot)
+	instance.length++
 	return nil
 }
 
-// FixedOrderedListInsertAtUnsafe inserts a value T at position idx without
-// performing any bounds or capacity checks. It shifts all elements from idx
-// through length-1 one slot to the right and overwrites the new slot with `value`.
-//
-// This variant is intended for hot-path scenarios where correctness is guaranteed
-// by the caller. If idx >= length or the list is full, behavior is undefined.
-//
-// Precondition:
-//   - The caller must ensure there is at least one free slot remaining.
-//   - The caller must ensure idx <= length.
-//
-//go:nosplit
-func FixedOrderedListInsertAtUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64, value T) {
-	slot := StackPopUnsafe(fixedList.freeList)
-	ArraySetAtUnsafe(fixedList.dataArray, slot, value)
-	fixedListInsertIndex(fixedList, idx, slot)
-
-	fixedList.length++
+// FixedOrderedListInsertAtUnsafe inserts without validation.
+func FixedOrderedListInsertAtUnsafe[T any](list memcore.Pointer, idx uint64, value T) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	slot := StackPopUnsafe[uint64](instance.freeList)
+	ArraySetAtUnsafe(instance.dataArray, slot, value)
+	fixedListInsertIndex(instance, idx, slot)
+	instance.length++
 }
 
-// FixedOrderedListDelete deletes the element at idx and shifts subsequent
-// elements left by one slot. The last element is cleared.
-// Returns an error if idx is invalid.
-//
-//go:nosplit
-func FixedOrderedListDelete[T any](fixedList *FixedOrderedList[T], idx uint64) error {
-	if err := fixedListGuaranteeIdxReadValidity(fixedList, idx); err != nil {
+// FixedOrderedListDelete removes an element at logical index `idx` and
+// shifts remaining elements left by one slot. Returns an error if `idx`
+// is invalid.
+func FixedOrderedListDelete[T any](list memcore.Pointer, idx uint64) error {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	if err := fixedListGuaranteeIdxReadValidity(instance, idx); err != nil {
 		return err
 	}
-
-	slot := ArrayItemGetAtUnsafe(fixedList.indices, idx)
-	fixedListRemoveIndex(fixedList, idx)
-	StackPushUnsafe(fixedList.freeList, slot)
-
-	fixedList.length--
+	slot := ArrayItemGetAtUnsafe[uint64](instance.indices, idx)
+	fixedListRemoveIndex(instance, idx)
+	StackPushUnsafe(instance.freeList, slot)
+	instance.length--
 	return nil
 }
 
-// FixedOrderedListDeleteUnsafe deletes at idx and shifts subsequent elements left.
-// It does no validation checks at all.
-//
-// Precondition: idx must be valid, otherwise undefined behaviour.
-//
-//go:nosplit
-func FixedOrderedListDeleteUnsafe[T any](fixedList *FixedOrderedList[T], idx uint64) {
-	slot := ArrayItemGetAtUnsafe(fixedList.indices, idx)
-	fixedListRemoveIndex(fixedList, idx)
-	StackPushUnsafe(fixedList.freeList, slot)
-
-	fixedList.length--
+// FixedOrderedListDeleteUnsafe deletes without validation.
+func FixedOrderedListDeleteUnsafe[T any](list memcore.Pointer, idx uint64) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	slot := ArrayItemGetAtUnsafe[uint64](instance.indices, idx)
+	fixedListRemoveIndex(instance, idx)
+	StackPushUnsafe(instance.freeList, slot)
+	instance.length--
 }
 
-// FixedOrderedListBinarySearch performs a binary search O(log n) to find a value matching
-// the predicate in the fixed list.
-// This requires that the list is sorted, otherwise bugs will exist.
 //
-// It will return the index of the predicate in the list.
-// It returns an error if the predicate cannot be found.
+// ────────────────────────────────────────────────────────────────────────────────
+//   SEARCH UTILITIES
+// ────────────────────────────────────────────────────────────────────────────────
 //
-// The predicate function must return:
-// <br>- negative when item is below predicate
-// <br>- 0 when item is equal to predicate
-// <br>- positive when the item is above predicate
-// <br>- 127 to skip
+
+// FixedOrderedListBinarySearch performs a binary search over the list using
+// the provided comparator predicate. The list must be sorted according to
+// the same predicate logic.
 //
-//go:nosplit
-//go:inline
-func FixedOrderedListBinarySearch[T any](l *FixedOrderedList[T], predicate func(item T) int8) (uint64, error) {
-	n := l.length
+// The predicate must return:
+//   - negative when item < target
+//   - 0 when item == target
+//   - positive when item > target
+//
+// Returns the index of the matching element or an error if not found.
+func FixedOrderedListBinarySearch[T any](list memcore.Pointer, predicate func(item T) int8) (uint64, error) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	n := instance.length
 	if n == 0 {
 		return 0, fmt.Errorf("empty list")
 	}
 
 	lo := uint64(0)
 	hi := n
-
 	for lo < hi {
 		mid := (lo + hi) >> 1
-		item := fixedListGetElement(l, mid)
-
+		item := fixedListGetElement(instance, mid)
 		cmp := predicate(item)
 		if cmp < 0 {
 			lo = mid + 1
@@ -280,35 +317,29 @@ func FixedOrderedListBinarySearch[T any](l *FixedOrderedList[T], predicate func(
 			return mid, nil
 		}
 	}
-
-	return 0, fmt.Errorf("predicate cannot be found in the array")
+	return 0, fmt.Errorf("predicate not found")
 }
 
-// FixedOrderedListBinarySearchInterval uses a binary search O(log n) to find the position
-// where predicate can be inserted to keep order.
+// FixedOrderedListBinarySearchInterval locates the interval between two
+// neighboring elements where a new value could be inserted to preserve order.
 //
-// It returns the index of the previous item and the index of the next item
-// when inserted in between them.
+// Returns:
+//   - (prevIdx, nextIdx): indices of the neighboring elements
+//   - (^uint64(0), 0) if the list is empty
 //
-// The predicate function must return:
-// <br>- negative when item is below predicate
-// <br>- 0 or positive when the item is above predicate
-//
-//go:nosplit
-//go:inline
-func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predicate func(item T) int8) (uint64, uint64) {
-	n := l.length
+// The predicate rules are identical to BinarySearch but do not require equality.
+func FixedOrderedListBinarySearchInterval[T any](list memcore.Pointer, predicate func(item T) int8) (uint64, uint64) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	n := instance.length
 	if n == 0 {
 		return ^uint64(0), 0
 	}
 
 	lo := uint64(0)
 	hi := n
-
 	for lo < hi {
 		mid := (lo + hi) >> 1
-		item := fixedListGetElement(l, mid)
-
+		item := fixedListGetElement(instance, mid)
 		if predicate(item) < 0 {
 			lo = mid + 1
 		} else {
@@ -326,115 +357,115 @@ func FixedOrderedListBinarySearchInterval[T any](l *FixedOrderedList[T], predica
 	}
 }
 
-// FixedOrderedListBinarySearchInsertionPoint is a convencience wrapper around FixedListBinarySearchInterval,
-// it only returns the new insertion point, rather than previous and next indices.
-//
-// The predicate function must return:
-// <br>- negative when item is below predicate
-// <br>- 0 or positive when the item is above predicate
-//
-//go:nosplit
-func FixedOrderedListBinarySearchInsertionPoint[T any](fixedList *FixedOrderedList[T], predicate func(item T) int8) uint64 {
-	if fixedList.length == 0 {
+// FixedOrderedListBinarySearchInsertionPoint is a convenience wrapper
+// around BinarySearchInterval that returns only the new insertion index.
+func FixedOrderedListBinarySearchInsertionPoint[T any](list memcore.Pointer, predicate func(item T) int8) uint64 {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	if instance.length == 0 {
 		return 0
 	}
-	_, nextIdx := FixedOrderedListBinarySearchInterval(fixedList, predicate)
-	if nextIdx == ^uint64(0) {
+	_, next := FixedOrderedListBinarySearchInterval(list, predicate)
+	if next == ^uint64(0) {
 		return 0
 	}
-	return nextIdx
+	return next
 }
 
-// FixedOrderedListClear resets the list to allow for reuse.
-// Using pointers to previous items in the array is undefined behaviour.
-// It does not zero the underlying memory as that is not necessary due to insertion semantics.
 //
-//go:inline
-func FixedOrderedListClear[T any](fixedList *FixedOrderedList[T]) {
-	StackSnapshotRestore(fixedList.freeList, fixedList.freeListSnapshot)
-	fixedList.length = 0
-}
-
-// FixedOrderedListClearAndZero resets the list to allow for reuse.
-// Using pointers to previous items in the array is undefined behaviour.
-// It does zero the underlying memory, use only for sensitive information.
+// ────────────────────────────────────────────────────────────────────────────────
+//   CLEAR / RESET
+// ────────────────────────────────────────────────────────────────────────────────
 //
-//go:nosplit
-//go:inline
-func FixedOrderedListClearAndZero[T any](fixedList *FixedOrderedList[T]) {
-	ArrayClear(fixedList.dataArray)
-	StackSnapshotRestore(fixedList.freeList, fixedList.freeListSnapshot)
 
-	fixedList.length = 0
+// FixedOrderedListClear resets logical length to zero and restores the
+// freelist from its snapshot, allowing instant reuse of all slots.
+// The underlying memory contents remain untouched.
+func FixedOrderedListClear[T any](list memcore.Pointer) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	StackSnapshotRestore[uint64](instance.freeList, instance.freeListSnapshot)
+	instance.length = 0
 }
 
-func FixedOrderedListLengthGet[T any](l *FixedOrderedList[T]) uint64   { return l.length }
-func FixedOrderedListCapacityGet[T any](l *FixedOrderedList[T]) uint64 { return l.capacity }
+// FixedOrderedListClearAndZero behaves like Clear but additionally wipes
+// all data array memory using zeroing semantics (useful for sensitive data).
+func FixedOrderedListClearAndZero[T any](list memcore.Pointer) {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	ArrayClear[T](instance.dataArray)
+	StackSnapshotRestore[uint64](instance.freeList, instance.freeListSnapshot)
+	instance.length = 0
+}
 
-// FixedOrderedListIsIdxValid checks whether the given index is valid.
 //
-//go:inline
-func FixedOrderedListIsIdxValid[T any](l *FixedOrderedList[T], idx uint64) bool {
-	return idx < l.length
+// ────────────────────────────────────────────────────────────────────────────────
+//   LENGTH / CAPACITY UTILITIES
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+func FixedOrderedListLengthGet[T any](list memcore.Pointer) uint64 {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	return instance.length
 }
 
-// ----------------------------------------------- PRIVATE HELPERS
+func FixedOrderedListCapacityGet[T any](list memcore.Pointer) uint64 {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	return instance.capacity
+}
 
-//go:inline
-func fixedListInsertIndex[T any](fixedList *FixedOrderedList[T], logicalIdx uint64, slot uint64) {
-	n := fixedList.length
+func FixedOrderedListIsIdxValid[T any](list memcore.Pointer, idx uint64) bool {
+	instance := memcore.MemcorePointerDereferenceObjectUnsafe[FixedOrderedList[T]](list)
+	return idx < instance.length
+}
+
+//
+// ────────────────────────────────────────────────────────────────────────────────
+//   PRIVATE INTERNALS
+// ────────────────────────────────────────────────────────────────────────────────
+//
+
+func fixedListInsertIndex[T any](list *FixedOrderedList[T], logicalIdx, slot uint64) {
+	n := list.length
 	for i := n; i > logicalIdx; i-- {
-		prev := ArrayItemGetAtUnsafe(fixedList.indices, i-1)
-		ArraySetAtUnsafe(fixedList.indices, i, prev)
+		prev := ArrayItemGetAtUnsafe[uint64](list.indices, i-1)
+		ArraySetAtUnsafe(list.indices, i, prev)
 	}
-
-	ArraySetAtUnsafe(fixedList.indices, logicalIdx, slot)
+	ArraySetAtUnsafe(list.indices, logicalIdx, slot)
 }
 
-//go:inline
-func fixedListRemoveIndex[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) {
-	n := fixedList.length
+func fixedListRemoveIndex[T any](list *FixedOrderedList[T], logicalIdx uint64) {
+	n := list.length
 	for i := logicalIdx; i+1 < n; i++ {
-		next := ArrayItemGetAtUnsafe(fixedList.indices, i+1)
-		ArraySetAtUnsafe(fixedList.indices, i, next)
+		next := ArrayItemGetAtUnsafe[uint64](list.indices, i+1)
+		ArraySetAtUnsafe(list.indices, i, next)
 	}
 }
 
-//go:inline
-func fixedListGetPhysicalIdx[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) uint64 {
-	return ArrayItemGetAtUnsafe(fixedList.indices, logicalIdx)
+func fixedListGetPhysicalIdx[T any](list *FixedOrderedList[T], logicalIdx uint64) uint64 {
+	return ArrayItemGetAtUnsafe[uint64](list.indices, logicalIdx)
 }
 
-//go:inline
-func fixedListGetElement[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) T {
-	physicalIdx := fixedListGetPhysicalIdx(fixedList, logicalIdx)
-	return ArrayItemGetAtUnsafe(fixedList.dataArray, physicalIdx)
+func fixedListGetElement[T any](list *FixedOrderedList[T], logicalIdx uint64) T {
+	physicalIdx := fixedListGetPhysicalIdx(list, logicalIdx)
+	return ArrayItemGetAtUnsafe[T](list.dataArray, physicalIdx)
 }
 
-//go:inline
-func fixedListGetElementPtr[T any](fixedList *FixedOrderedList[T], logicalIdx uint64) *T {
-	physicalIdx := fixedListGetPhysicalIdx(fixedList, logicalIdx)
-	return ArrayItemPtrGetAtUnsafe(fixedList.dataArray, physicalIdx)
+func fixedListGetElementPtr[T any](list *FixedOrderedList[T], logicalIdx uint64) *T {
+	physicalIdx := fixedListGetPhysicalIdx(list, logicalIdx)
+	return ArrayItemPtrGetAtUnsafe[T](list.dataArray, physicalIdx)
 }
 
-//go:inline
-func fixedListGuaranteeIdxInsertionValidity[T any](fixedList *FixedOrderedList[T], idx uint64) error {
-	if idx >= fixedList.capacity {
-		return fmt.Errorf("index %v out of bounds: capacity %v", idx, fixedList.capacity)
+func fixedListGuaranteeIdxInsertionValidity[T any](list *FixedOrderedList[T], idx uint64) error {
+	if idx >= list.capacity {
+		return fmt.Errorf("index %v out of bounds (capacity %v)", idx, list.capacity)
 	}
-	if idx > fixedList.length {
-		return fmt.Errorf("[fixed ordered list] insertion index %v invalid: must be between 0 and %v (inclusive)", idx, fixedList.length)
+	if idx > list.length {
+		return fmt.Errorf("invalid insertion index %v (0 ≤ idx ≤ %v)", idx, list.length)
 	}
-
 	return nil
 }
 
-//go:inline
-func fixedListGuaranteeIdxReadValidity[T any](fixedList *FixedOrderedList[T], idx uint64) error {
-	if idx >= fixedList.length {
-		return fmt.Errorf("[fixed ordered list] read index %v invalid: must be between 0 and %v (exclusive)", idx, fixedList.length)
-
+func fixedListGuaranteeIdxReadValidity[T any](list *FixedOrderedList[T], idx uint64) error {
+	if idx >= list.length {
+		return fmt.Errorf("invalid read index %v (0 ≤ idx < %v)", idx, list.length)
 	}
-
 	return nil
 }

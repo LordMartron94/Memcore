@@ -23,6 +23,13 @@ func platformMemmapUnmap(memmap MemoryMap) error {
 	return nil
 }
 
+func platformMemmapUnmapAt(addr unsafe.Pointer, byteAmount int) error {
+	if err := unix.MunmapPtr(addr, uintptr(byteAmount)); err != nil {
+		return fmt.Errorf("munmap at fixed address failed: %w\naddr=%v, bytes=%v", err, addr, byteAmount)
+	}
+	return nil
+}
+
 func platformMemmapProtect(memmap MemoryMap, protection MemoryProtectionFlag) error {
 	if err := unix.Mprotect(memmap, int(protection)); err != nil {
 		return fmt.Errorf("mprotect failed: %w", err)
@@ -80,17 +87,19 @@ func platformMemmapRemap(memmap MemoryMap, newSize int, flags MemoryRemapFlag) (
 	return MemoryMap(newMap), nil
 }
 
+func platformMemmapRemapAt(addr unsafe.Pointer, oldSize, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
+	newPtr, err := unix.MremapPtr(addr, uintptr(oldSize), nil, uintptr(newSize), int(flags))
+	if err != nil {
+		return nil, fmt.Errorf("mremap at fixed address failed: %w", err)
+	}
+
+	return unsafe.Slice((*byte)(newPtr), newSize), nil
+}
+
 func platformMemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (unsafe.Pointer, error) {
 	p, err := unix.MmapPtr(-1, 0, addr, uintptr(byteAmount), int(protection), int(flags)|int(MAP_FIXED))
 	if err != nil {
 		return nil, fmt.Errorf("mmap at fixed address failed: %w", err)
 	}
 	return p, nil
-}
-
-func platformMemmapUnmapAt(addr unsafe.Pointer, byteAmount int) error {
-	if err := unix.MunmapPtr(addr, uintptr(byteAmount)); err != nil {
-		return fmt.Errorf("munmap at fixed address failed: %w", err)
-	}
-	return nil
 }

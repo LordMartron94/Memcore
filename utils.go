@@ -1,6 +1,9 @@
 package memcore
 
-import "unsafe"
+import (
+	"reflect"
+	"unsafe"
+)
 
 // SizeOf returns the size of any item in an int64-type.
 // Note: This is safe for most operating systems, but on certain exotic architectures,
@@ -14,4 +17,9 @@ func SizeOf[T any]() uint64 {
 func AlignOf[T any]() uint64 {
 	var zero T
 	return (uint64)(unsafe.Alignof(zero))
+}
+
+// TypeOf wraps reflect.TypeFor[T]
+func TypeOf[T any]() reflect.Type {
+	return reflect.TypeFor[T]()
 }

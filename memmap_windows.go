@@ -137,6 +137,26 @@ func platformMemmapRemap(memmap MemoryMap, newSize int, flags MemoryRemapFlag) (
 	return newMap, nil
 }
 
+func platformMemmapRemapAt(addr unsafe.Pointer, oldSize, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
+	if newSize <= 0 {
+		return nil, fmt.Errorf("invalid new size: %d", newSize)
+	}
+
+	newMap, err := platformMemmapRequest(newSize, PROT_READWRITE, MAP_ANON_PRIVATE)
+	if err != nil {
+		return nil, err
+	}
+
+	oldSlice := unsafe.Slice((*byte)(addr), oldSize)
+	copy(newMap, oldSlice)
+
+	if err := platformMemmapUnmap(oldSlice); err != nil {
+		return nil, err
+	}
+
+	return newMap, nil
+}
+
 // Fixed address mapping equivalents (rarely used on Windows)
 func platformMemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (unsafe.Pointer, error) {
 	// Windows doesn’t allow user-specified addresses for anonymous mappings easily.
