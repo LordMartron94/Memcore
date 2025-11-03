@@ -508,72 +508,216 @@ func MemcorePrintPointerDebug() {
 func printExistingPointers() {
 	const boxWidth = 100
 
+	// Header
 	fmt.Printf("\n%s╔%s╗%s\n", colorBoldCyan, strings.Repeat("═", boxWidth-2), colorReset)
-	header := "POINTER DEBUG REPORT"
-	padding := (boxWidth - 2 - len(header)) / 2
-	fmt.Printf("%s║%s%s%s%s║%s\n", colorBoldCyan, strings.Repeat(" ", padding),
-		header, strings.Repeat(" ", boxWidth-2-padding-len(header)), colorBoldCyan, colorReset)
+	headerText := "POINTER DEBUG REPORT"
+	padding := (boxWidth - 2 - len(headerText)) / 2
+	fmt.Printf("%s║%s%s%s%s║%s\n",
+		colorBoldCyan,
+		strings.Repeat(" ", padding),
+		headerText,
+		strings.Repeat(" ", boxWidth-2-padding-len(headerText)),
+		colorBoldCyan,
+		colorReset)
 	fmt.Printf("%s╚%s╝%s\n\n", colorBoldCyan, strings.Repeat("═", boxWidth-2), colorReset)
 
+	// Gather pointers
 	keys := make([]Pointer, 0, 2048)
 	for _, shard := range pointerShards {
 		for k := range shard.table {
 			keys = append(keys, k)
 		}
 	}
-	slices.SortFunc(keys, func(a, b Pointer) int {
-		ma := pointerShards[shardIndex(a)].table[a]
-		mb := pointerShards[shardIndex(b)].table[b]
-		if ma.timestamp < mb.timestamp {
+
+	// Sort by timestamp
+	slices.SortFunc(keys, func(p1, p2 Pointer) int {
+		md1 := pointerShards[shardIndex(p1)].table[p1]
+		md2 := pointerShards[shardIndex(p2)].table[p2]
+		if md1.timestamp < md2.timestamp {
 			return -1
 		}
-		if ma.timestamp > mb.timestamp {
+		if md1.timestamp > md2.timestamp {
 			return 1
 		}
 		return 0
 	})
 
-	byAS := make(map[uint32][]Pointer)
-	for _, p := range keys {
-		byAS[p.addressSpace] = append(byAS[p.addressSpace], p)
+	// Group by address space
+	byAddressSpace := make(map[uint32][]Pointer)
+	for _, ptr := range keys {
+		as := ptr.addressSpace
+		byAddressSpace[as] = append(byAddressSpace[as], ptr)
 	}
 
-	active, inactive := 0, 0
+	// Print statistics
+	activeCount := 0
+	inactiveCount := 0
 	for _, shard := range pointerShards {
 		for _, md := range shard.table {
 			if md.activePtr {
-				active++
+				activeCount++
 			} else {
-				inactive++
+				inactiveCount++
 			}
 		}
 	}
 
-	fmt.Printf("%s┌─ Stats %s\n", colorBoldWhite, strings.Repeat("─", boxWidth-10))
-	fmt.Printf("%s│%s Total:%s %d  Active:%s %d%s  Inactive:%s %d%s\n",
-		colorBoldWhite, colorReset, colorWhite, len(keys),
-		colorGreen, active, colorReset, colorRed, inactive, colorReset)
-	fmt.Printf("%s└%s\n\n", colorBoldWhite, strings.Repeat("─", boxWidth-1))
+	fmt.Printf("%s┌─ Statistics %s\n", colorBoldWhite, strings.Repeat("─", boxWidth-14))
+	fmt.Printf("%s│%s  %sTotal Pointers:%s %s%d%s  ", colorBoldWhite, colorReset, colorWhite, colorReset, colorBoldGreen, len(keys), colorReset)
+	fmt.Printf("%sActive:%s %s%d%s  ", colorWhite, colorReset, colorGreen, activeCount, colorReset)
+	fmt.Printf("%sInactive:%s %s%d%s\n", colorWhite, colorReset, colorRed, inactiveCount, colorReset)
+	fmt.Printf("%s│%s  %sAddress Spaces:%s %s%d%s", colorBoldWhite, colorReset, colorWhite, colorReset, colorCyan, len(byAddressSpace), colorReset)
 
-	for as, ps := range byAS {
+	// Count destroyed address spaces
+	destroyedCount := 0
+	for _, md := range addressSpaceMap {
+		if md.destroyed {
+			destroyedCount++
+		}
+	}
+	if destroyedCount > 0 {
+		fmt.Printf("  %sDestroyed:%s %s%d%s", colorWhite, colorReset, colorRed, destroyedCount, colorReset)
+	}
+	fmt.Printf("\n%s└%s\n\n", colorBoldWhite, strings.Repeat("─", boxWidth-1))
+
+	// Print each address space
+	asKeys := make([]uint32, 0, len(byAddressSpace))
+	for as := range byAddressSpace {
+		asKeys = append(asKeys, as)
+	}
+	slices.Sort(asKeys)
+
+	for asIdx, as := range asKeys {
+		pointers := byAddressSpace[as]
 		asMd := addressSpaceMap[as]
-		status := ""
+
+		// Address space header
+		headerLine := fmt.Sprintf("Address Space %d [Base: 0x%x]", as, asMd.baseAddress)
 		if asMd.destroyed {
-			status = " [DESTROYED]"
+			headerLine += " [DESTROYED]"
 		}
-		fmt.Printf("%sAddressSpace %d%s (%d ptr%s)%s\n",
-			colorBoldYellow, as, status, len(ps), pluralize(len(ps)), colorReset)
-		for i, p := range ps {
-			md := pointerShards[shardIndex(p)].table[p]
-			color := colorGreen
+		headerLine += fmt.Sprintf(" (%d pointer%s)", len(pointers), pluralize(len(pointers)))
+
+		remainingWidth := boxWidth - len(headerLine) - 4
+		if remainingWidth < 0 {
+			remainingWidth = 0
+		}
+
+		fmt.Printf("%s┌─ %s%s %s%s\n",
+			colorBoldYellow,
+			headerLine,
+			colorYellow,
+			strings.Repeat("─", remainingWidth),
+			colorReset)
+
+		for i, ptr := range pointers {
+			md := pointerShards[shardIndex(ptr)].table[ptr]
+
+			// Status indicator
+			statusColor := colorGreen
+			statusSymbol := "●"
+			statusText := "ACTIVE  "
 			if !md.activePtr {
-				color = colorRed
+				statusColor = colorRed
+				statusSymbol = "○"
+				statusText = "INACTIVE"
 			}
-			fmt.Printf(" %s%03d)%s %-30s Offset 0x%x\n",
-				color, i, colorReset, truncateString(md.pointerType.Readable(), 30), p.offset)
+
+			// Index and status
+			fmt.Printf("%s│%s  %s%03d%s) %s%s %s%s ",
+				colorYellow, colorReset,
+				colorGray, i, colorReset,
+				statusColor, statusSymbol, statusText, colorReset)
+
+			// Type and offset
+			typeName := truncateString(md.pointerType.Readable(), 30)
+			fmt.Printf("%sType:%s %s%-30s%s ",
+				colorWhite, colorReset,
+				colorMagenta, typeName, colorReset)
+
+			fmt.Printf("%sOffset:%s %s0x%08x%s\n",
+				colorWhite, colorReset,
+				colorBlue, ptr.offset, colorReset)
+
+			// Creator info (shortened path)
+			creatorParts := strings.SplitN(resolveCreatorString(md.creatorID), " ", 2)
+			fileLine := creatorParts[0]
+			function := ""
+			if len(creatorParts) > 1 {
+				function = strings.Trim(creatorParts[1], "()")
+			}
+
+			// Shorten file path
+			if strings.Contains(fileLine, "/") {
+				parts := strings.Split(fileLine, "/")
+				if len(parts) > 3 {
+					fileLine = ".../" + strings.Join(parts[len(parts)-3:], "/")
+				}
+			}
+
+			fmt.Printf("%s│%s     %s└─%s %sLocation:%s %s%s%s",
+				colorYellow, colorReset,
+				colorGray, colorReset,
+				colorWhite, colorReset,
+				colorCyan, fileLine, colorReset)
+
+			if function != "" {
+				shortFunc := filepath.Base(function)
+				fmt.Printf(" %s[%s]%s", colorGray, shortFunc, colorReset)
+			}
+			fmt.Printf("\n")
+
+			// Timestamp
+			t := time.Unix(0, md.timestamp)
+			age := time.Since(t)
+			ageStr := formatDuration(age)
+			fmt.Printf("%s│%s        %sCreated:%s %s%s%s %s(%s ago)%s\n",
+				colorYellow, colorReset,
+				colorWhite, colorReset,
+				colorGray, t.Format("2006-01-02 15:04:05.000"), colorReset,
+				colorGray, ageStr, colorReset)
+
+			// Separator between pointers
+			if i < len(pointers)-1 {
+				fmt.Printf("%s│%s\n", colorYellow, colorReset)
+			}
 		}
-		fmt.Println()
+
+		fmt.Printf("%s└%s%s\n", colorYellow, strings.Repeat("─", boxWidth-1), colorReset)
+
+		// Add spacing between address spaces
+		if asIdx < len(asKeys)-1 {
+			fmt.Println()
+		}
 	}
+
+	fmt.Println()
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		secs := d.Seconds()
+		if secs < 10 {
+			return fmt.Sprintf("%.1fs", secs)
+		}
+		return fmt.Sprintf("%ds", int(secs))
+	}
+	if d < time.Hour {
+		mins := int(d.Minutes())
+		secs := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	days := int(d.Hours() / 24)
+	h := int(d.Hours()) % 24
+	return fmt.Sprintf("%dd %dh", days, h)
 }
 
 func pluralize(n int) string {
