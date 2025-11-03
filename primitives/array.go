@@ -9,6 +9,8 @@ import (
 
 const arrayMemmoveThreshold uint64 = 128
 
+type setFn[T any] func(idx uint64, value T)
+
 func setByMove[T any](instance *Array[T], baseAddr unsafe.Pointer, idx uint64, value T) {
 	dstPtr := arrayGetPtrAtIdx(instance, baseAddr, idx)
 	srcPtr := unsafe.Pointer(&value)
@@ -35,7 +37,7 @@ type Array[T any] struct {
 	dataAddrOffset uintptr
 	capacity       uint64
 
-	// setFn func(idx uint64, value T)
+	setFnID memcore.FunctionID
 
 	itemSize        uint64
 	itemSizeUintPtr uintptr
@@ -57,11 +59,19 @@ func ArrayInitializeAt[T any](arrayAddr memcore.Pointer, capacity uint64) {
 		itemSizeUintPtr: uintptr(itemSize),
 	}
 
-	// if itemSize > arrayMemmoveThreshold {
-	// 	array.setFn = func(i uint64, v T) { setByMove(array, i, v) }
-	// } else {
-	// 	array.setFn = func(i uint64, v T) { setByAssign(array, i, v) }
-	// }
+	if itemSize > arrayMemmoveThreshold {
+		arrayPtr.setFnID = memcore.MemcoreFunctionRegisterTyped[setFn[T]](
+			func(i uint64, v T) {
+				setByMove(arrayPtr, memcore.MemcorePointerDereferenceRaw(arrayAddr), i, v)
+			},
+		)
+	} else {
+		arrayPtr.setFnID = memcore.MemcoreFunctionRegisterTyped[setFn[T]](
+			func(i uint64, v T) {
+				setByAssign(arrayPtr, memcore.MemcorePointerDereferenceRaw(arrayAddr), i, v)
+			},
+		)
+	}
 }
 
 // ArraySnapshotCreate creates a deep copy of an array at a new memory location
@@ -182,9 +192,7 @@ func ArraySetAt[T any](array memcore.Pointer, idx uint64, value T) error {
 		return error
 	}
 
-	// array.setFn(idx, value)
-	baseAddr := memcore.MemcorePointerDereferenceRaw(array)
-	setByAssign(instance, baseAddr, idx, value)
+	memcore.MemcoreFunctionGetTyped[setFn[T]](instance.setFnID)(idx, value)
 
 	return nil
 }
@@ -196,8 +204,7 @@ func ArraySetAt[T any](array memcore.Pointer, idx uint64, value T) error {
 //go:inline
 func ArraySetAtUnsafe[T any](array memcore.Pointer, idx uint64, value T) {
 	instance := memcore.MemcorePointerDereferenceObjectUnsafe[Array[T]](array)
-	baseAddr := memcore.MemcorePointerDereferenceRaw(array)
-	setByAssign(instance, baseAddr, idx, value)
+	memcore.MemcoreFunctionGetTyped[setFn[T]](instance.setFnID)(idx, value)
 }
 
 // ArrayReplaceInternal replaces srcIdx with the value at destIdx efficiently.
