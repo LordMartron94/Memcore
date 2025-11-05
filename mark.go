@@ -149,13 +149,22 @@ func MemcoreMarkDereference(mark MarkRaw) unsafe.Pointer {
 	return unsafe.Pointer(r.base + mark.offset)
 }
 
-// MemcoreMarkDereferenceObject returns the memory marked interpretedd as object T.
+// MemcoreMarkDereferenceObject returns the memory marked interpreted as object T.
 //
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceObject[T any](mark MarkRaw) *T {
 	addr := MemcoreMarkDereference(mark)
 	return (*T)(addr)
+}
+
+// MemcoreMarkDereferenceObjectAlt returns the memory marked interpreted as object T as well as the raw pointer.
+//
+//go:nosplit
+//go:inline
+func MemcoreMarkDereferenceObjectAlt[T any](mark MarkRaw) (unsafe.Pointer, *T) {
+	addr := MemcoreMarkDereference(mark)
+	return addr, (*T)(addr)
 }
 
 // MemcoreMarkIsValid reports whether the mark references a valid region.
