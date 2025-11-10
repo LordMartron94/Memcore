@@ -7,13 +7,15 @@ import (
 
 var (
 	functionIDCounter uint32 = 0
-	objectIDCounter   uint32 = 0
 
 	regionRegistry []memoryRegion = make([]memoryRegion, 0)
 	regionFreeList []uint32       = make([]uint32, 0)
 
 	functionRegistry map[uint32]interface{} = make(map[uint32]interface{})
-	objectRegistry                          = make(map[uint32]MarkRaw)
+
+	objectRegistry  []objectEntry = make([]objectEntry, 0)
+	objectFreeList  []uint32      = make([]uint32, 0)
+	objectIDCounter uint32        = 0
 )
 
 // MemcoreMarkManagementStateReset resets the state to preserve memory.
@@ -26,8 +28,7 @@ func MemcoreMarkManagementStateReset(resetFunctions bool) {
 	regionRegistry = make([]memoryRegion, 0)
 	regionFreeList = make([]uint32, 0)
 
-	objectIDCounter = 0
-	objectRegistry = make(map[uint32]MarkRaw)
+	MemcoreObjectRegistryClear()
 }
 
 type FunctionID = uint32
@@ -38,6 +39,11 @@ type memoryRegion struct {
 	base      uintptr
 	sizeBytes uint64
 	active    bool
+}
+
+type objectEntry struct {
+	mark   MarkRaw
+	active bool
 }
 
 // MarkRaw provides the basic information necessary to interact with raw memory.
@@ -249,34 +255,72 @@ func MemcoreFunctionRetrieveTyped[T any](id uint32) T {
 // ---------------------------------------- OBJECTS
 
 // MemcoreObjectRegister assigns a new ObjectID and links it to a MarkRaw.
+//
+//go:nosplit
+//go:inline
 func MemcoreObjectRegister(mark MarkRaw) ObjectID {
+	var id uint32
+
+	if len(objectFreeList) > 0 {
+		id = objectFreeList[len(objectFreeList)-1]
+		objectFreeList = objectFreeList[:len(objectFreeList)-1]
+		objectRegistry[id] = objectEntry{mark, true}
+	} else {
+		id = uint32(len(objectRegistry))
+		objectRegistry = append(objectRegistry, objectEntry{mark, true})
+	}
+
 	objectIDCounter++
-	id := objectIDCounter
-	objectRegistry[id] = mark
 	return id
 }
 
 // MemcoreObjectRebind updates an existing ObjectID → MarkRaw mapping.
-// Use this when an object moves to a new region/base (relocation, snapshot restore, etc).
+//
+//go:nosplit
+//go:inline
 func MemcoreObjectRebind(id ObjectID, mark MarkRaw) {
-	objectRegistry[id] = mark
+	if int(id) >= len(objectRegistry) {
+		panic("memcore: invalid ObjectID in rebind")
+	}
+	objectRegistry[id] = objectEntry{mark, true}
 }
 
 // MemcoreObjectUnregister removes an object mapping entirely.
+//
+//go:nosplit
+//go:inline
 func MemcoreObjectUnregister(id ObjectID) {
-	delete(objectRegistry, id)
+	if int(id) >= len(objectRegistry) {
+		return
+	}
+	objectRegistry[id] = objectEntry{MarkRaw{}, false}
+	objectFreeList = append(objectFreeList, id)
 }
 
 // MemcoreObjectResolve retrieves the MarkRaw associated with an ObjectID.
-// Returns (MarkRaw{}, false) if not found.
+//
+//go:nosplit
+//go:inline
 func MemcoreObjectResolve(id ObjectID) (MarkRaw, bool) {
-	mark, ok := objectRegistry[id]
-
-	r := regionRegistry[mark.regionID]
-	if !r.active {
-		delete(objectRegistry, id)
+	if uintptr(id) >= uintptr(len(objectRegistry)) {
 		return MarkRaw{}, false
 	}
+	e := &objectRegistry[id]
+	if !e.active {
+		return MarkRaw{}, false
+	}
+	r := &regionRegistry[e.mark.regionID]
+	if !r.active {
+		e.active = false
+		objectFreeList = append(objectFreeList, id)
+		return MarkRaw{}, false
+	}
+	return e.mark, true
+}
 
-	return mark, ok
+// MemcoreObjectRegistryClear resets all object mappings.
+func MemcoreObjectRegistryClear() {
+	objectRegistry = make([]objectEntry, 0)
+	objectFreeList = make([]uint32, 0)
+	objectIDCounter = 0
 }
