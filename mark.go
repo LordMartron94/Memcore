@@ -7,11 +7,13 @@ import (
 
 var (
 	functionIDCounter uint32 = 0
+	objectIDCounter   uint32 = 0
 
 	regionRegistry []memoryRegion = make([]memoryRegion, 0)
 	regionFreeList []uint32       = make([]uint32, 0)
 
 	functionRegistry map[uint32]interface{} = make(map[uint32]interface{})
+	objectRegistry                          = make(map[uint32]MarkRaw)
 )
 
 // MemcoreMarkManagementStateReset resets the state to preserve memory.
@@ -23,9 +25,13 @@ func MemcoreMarkManagementStateReset(resetFunctions bool) {
 
 	regionRegistry = make([]memoryRegion, 0)
 	regionFreeList = make([]uint32, 0)
+
+	objectIDCounter = 0
+	objectRegistry = make(map[uint32]MarkRaw)
 }
 
 type FunctionID = uint32
+type ObjectID = uint32
 
 // memoryRegion provides information necessary to interact with memory regions.
 type memoryRegion struct {
@@ -238,4 +244,39 @@ func MemcoreFunctionRetrieveTyped[T any](id uint32) T {
 		panic(fmt.Errorf("function ID %d: type mismatch: stored %T, requested %T", id, fn, *new(T)))
 	}
 	return v
+}
+
+// ---------------------------------------- OBJECTS
+
+// MemcoreObjectRegister assigns a new ObjectID and links it to a MarkRaw.
+func MemcoreObjectRegister(mark MarkRaw) ObjectID {
+	objectIDCounter++
+	id := objectIDCounter
+	objectRegistry[id] = mark
+	return id
+}
+
+// MemcoreObjectRebind updates an existing ObjectID → MarkRaw mapping.
+// Use this when an object moves to a new region/base (relocation, snapshot restore, etc).
+func MemcoreObjectRebind(id ObjectID, mark MarkRaw) {
+	objectRegistry[id] = mark
+}
+
+// MemcoreObjectUnregister removes an object mapping entirely.
+func MemcoreObjectUnregister(id ObjectID) {
+	delete(objectRegistry, id)
+}
+
+// MemcoreObjectResolve retrieves the MarkRaw associated with an ObjectID.
+// Returns (MarkRaw{}, false) if not found.
+func MemcoreObjectResolve(id ObjectID) (MarkRaw, bool) {
+	mark, ok := objectRegistry[id]
+
+	r := regionRegistry[mark.regionID]
+	if !r.active {
+		delete(objectRegistry, id)
+		return MarkRaw{}, false
+	}
+
+	return mark, ok
 }
