@@ -6,27 +6,29 @@ import (
 )
 
 var (
-	functionIDCounter uint32 = 0
-
 	regionRegistry []memoryRegion = make([]memoryRegion, 0)
 	regionFreeList []uint32       = make([]uint32, 0)
+	regionBases    []uintptr      = make([]uintptr, 0)
 
-	functionRegistry map[uint32]interface{} = make(map[uint32]interface{})
+	functionRegistry  []interface{} = make([]interface{}, 0)
+	functionFreeList  []uint32      = make([]uint32, 0)
+	functionIDCounter uint32        = 0
 
-	objectRegistry  []objectEntry = make([]objectEntry, 0)
-	objectFreeList  []uint32      = make([]uint32, 0)
-	objectIDCounter uint32        = 0
+	objectRegistry  []MarkRaw = make([]MarkRaw, 0)
+	objectFreeList  []uint32  = make([]uint32, 0)
+	objectActive    []bool    = make([]bool, 0)
+	objectIDCounter uint32    = 0
 )
 
 // MemcoreMarkManagementStateReset resets the state to preserve memory.
 func MemcoreMarkManagementStateReset(resetFunctions bool) {
 	if resetFunctions {
-		functionIDCounter = 0
-		functionRegistry = make(map[uint32]interface{})
+		MemcoreFunctionRegistryClear()
 	}
 
 	regionRegistry = make([]memoryRegion, 0)
 	regionFreeList = make([]uint32, 0)
+	regionBases = make([]uintptr, 0)
 
 	MemcoreObjectRegistryClear()
 }
@@ -39,11 +41,6 @@ type memoryRegion struct {
 	base      uintptr
 	sizeBytes uint64
 	active    bool
-}
-
-type objectEntry struct {
-	mark   MarkRaw
-	active bool
 }
 
 // MarkRaw provides the basic information necessary to interact with raw memory.
@@ -65,9 +62,11 @@ func MemcoreRegionRegister(baseAddr uintptr, sizeBytes uint64) uint32 {
 		id = regionFreeList[len(regionFreeList)-1]
 		regionFreeList = regionFreeList[:len(regionFreeList)-1]
 		regionRegistry[id] = memoryRegion{baseAddr, sizeBytes, true}
+		regionBases[id] = baseAddr
 	} else {
 		id = uint32(len(regionRegistry))
 		regionRegistry = append(regionRegistry, memoryRegion{baseAddr, sizeBytes, true})
+		regionBases = append(regionBases, baseAddr)
 	}
 	return id
 }
@@ -77,10 +76,18 @@ func MemcoreRegionRegister(baseAddr uintptr, sizeBytes uint64) uint32 {
 //go:nosplit
 //go:inline
 func MemcoreRegionUnregister(regionID uint32) {
+	if int(regionID) >= len(regionRegistry) {
+		return
+	}
 	r := &regionRegistry[regionID]
 	r.base = 0
 	r.sizeBytes = 0
 	r.active = false
+
+	if int(regionID) < len(regionBases) {
+		regionBases[regionID] = 0
+	}
+
 	regionFreeList = append(regionFreeList, regionID)
 }
 
@@ -90,6 +97,7 @@ func MemcoreRegionUnregister(regionID uint32) {
 //go:inline
 func MemcoreRegionBaseUpdate(regionID uint32, newBase uintptr) {
 	regionRegistry[regionID].base = newBase
+	regionBases[regionID] = newBase
 }
 
 // ---------------------------------------- MARKS
@@ -140,13 +148,18 @@ func MemcoreMarkSubtractBaseOffset(mark MarkRaw, baseOffset uintptr) uintptr {
 //	aligned := MemcoreMarkAlignedOffsetFrom(base, 13, 8)
 //	// aligned.offset == 16
 //
+// It also returns the padding that occured because of the alignment.
+//
 //go:nosplit
 //go:inline
-func MemcoreMarkAlignedOffsetFrom(base MarkRaw, offset uintptr, alignment uint64) MarkRaw {
+func MemcoreMarkAlignedOffsetFrom(base MarkRaw, offset uintptr, alignment uint64) (MarkRaw, uint64) {
+	idx := AlignUp(uint64(base.offset+offset), alignment)
+	padding := idx - (uint64(base.offset + offset))
+
 	return MarkRaw{
 		regionID: base.regionID,
-		offset:   uintptr(AlignUp(uint64(base.offset+offset), alignment)),
-	}
+		offset:   uintptr(idx),
+	}, padding
 }
 
 // MemcoreMarkDereference returns a pointer to the memory marked.
@@ -161,6 +174,16 @@ func MemcoreMarkDereference(mark MarkRaw) unsafe.Pointer {
 	return unsafe.Pointer(r.base + mark.offset)
 }
 
+// MemcoreMarkDereferenceUnsafe returns a pointer to the memory marked.
+// This variant is pure pointer arithmetic and does not validate whether the
+// region or mark is valid.
+//
+//go:nosplit
+//go:inline
+func MemcoreMarkDereferenceUnsafe(mark MarkRaw) unsafe.Pointer {
+	return unsafe.Pointer(regionBases[mark.regionID] + mark.offset)
+}
+
 // MemcoreMarkDereferenceObject returns the memory marked interpreted as object T.
 //
 //go:nosplit
@@ -170,12 +193,34 @@ func MemcoreMarkDereferenceObject[T any](mark MarkRaw) *T {
 	return (*T)(addr)
 }
 
+// MemcoreMarkDereferenceObjectUnsafe returns the memory marked interpreted as object T.
+// This variant is pure pointer arithmetic and does not validate whether the
+// region or mark is valid.
+//
+//go:nosplit
+//go:inline
+func MemcoreMarkDereferenceObjectUnsafe[T any](mark MarkRaw) *T {
+	addr := MemcoreMarkDereferenceUnsafe(mark)
+	return (*T)(addr)
+}
+
 // MemcoreMarkDereferenceObjectAlt returns the memory marked interpreted as object T as well as the raw pointer.
 //
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceObjectAlt[T any](mark MarkRaw) (unsafe.Pointer, *T) {
 	addr := MemcoreMarkDereference(mark)
+	return addr, (*T)(addr)
+}
+
+// MemcoreMarkDereferenceObjectAltUnsafe returns the memory marked interpreted as object T as well as the raw pointer.
+// This variant is pure pointer arithmetic and does not validate whether the
+// region or mark is valid.
+//
+//go:nosplit
+//go:inline
+func MemcoreMarkDereferenceObjectAltUnsafe[T any](mark MarkRaw) (unsafe.Pointer, *T) {
+	addr := MemcoreMarkDereferenceUnsafe(mark)
 	return addr, (*T)(addr)
 }
 
@@ -205,51 +250,86 @@ func MemcoreMarkBelongsToRegion(m MarkRaw, other MarkRaw) bool {
 
 // ---------------------------------------- FUNCTIONS
 
-// MemcoreFunctionRegister registers a function to the registry and returns its ID.
+// MemcoreFunctionRegister registers a function and returns its ID.
 //
 //go:nosplit
 //go:inline
-func MemcoreFunctionRegister(function interface{}) FunctionID {
-	id := functionIDCounter
-
-	functionRegistry[id] = function
-
-	functionIDCounter++
+func MemcoreFunctionRegister(fn interface{}) FunctionID {
+	var id uint32
+	if n := len(functionFreeList); n > 0 {
+		id = functionFreeList[n-1]
+		functionFreeList = functionFreeList[:n-1]
+		functionRegistry[id] = fn
+	} else {
+		id = uint32(len(functionRegistry))
+		functionRegistry = append(functionRegistry, fn)
+	}
 	return id
 }
 
-// MemcoreFunctionRegisterTyped registers a function T to the registry and returns its ID.
+// MemcoreFunctionRegisterTyped registers a strongly typed function and returns its ID.
 //
 //go:nosplit
 //go:inline
 func MemcoreFunctionRegisterTyped[T any](function T) FunctionID {
-	id := functionIDCounter
-
-	functionRegistry[id] = function
-
-	functionIDCounter++
-	return id
+	return MemcoreFunctionRegister(function)
 }
 
-// MemcoreFunctionRetrieve retrieves a function from the registry by its ID.
+// MemcoreFunctionRebind updates an existing function entry.
 //
 //go:nosplit
 //go:inline
-func MemcoreFunctionRetrieve(functionID uint32) interface{} {
-	return functionRegistry[functionID]
+func MemcoreFunctionRebind(id FunctionID, fn interface{}) {
+	if int(id) >= len(functionRegistry) {
+		panic("memcore: invalid FunctionID in rebind")
+	}
+	functionRegistry[id] = fn
 }
 
-// MemcoreFunctionRetrieveTyped retrieves a function from the registry interpreted as T.
+// MemcoreFunctionUnregister removes a function entry.
 //
 //go:nosplit
 //go:inline
-func MemcoreFunctionRetrieveTyped[T any](id uint32) T {
-	fn := MemcoreFunctionRetrieve(id)
+func MemcoreFunctionUnregister(id FunctionID) {
+	if int(id) >= len(functionRegistry) {
+		return
+	}
+	functionRegistry[id] = nil
+	functionFreeList = append(functionFreeList, id)
+}
+
+// MemcoreFunctionRetrieve retrieves a raw function by ID.
+//
+//go:nosplit
+//go:inline
+func MemcoreFunctionRetrieve(id FunctionID) interface{} {
+	if int(id) >= len(functionRegistry) {
+		return nil
+	}
+	return functionRegistry[id]
+}
+
+// MemcoreFunctionRetrieveTyped retrieves a function and casts it to type T.
+//
+//go:nosplit
+//go:inline
+func MemcoreFunctionRetrieveTyped[T any](id FunctionID) T {
+	fn := functionRegistry[id]
+	if fn == nil {
+		panic(fmt.Errorf("function ID %d inactive", id))
+	}
 	v, ok := fn.(T)
 	if !ok {
-		panic(fmt.Errorf("function ID %d: type mismatch: stored %T, requested %T", id, fn, *new(T)))
+		panic(fmt.Errorf("function ID %d type mismatch", id))
 	}
 	return v
+}
+
+// MemcoreFunctionRegistryClear resets all registered functions.
+func MemcoreFunctionRegistryClear() {
+	functionRegistry = make([]interface{}, 0)
+	functionFreeList = make([]uint32, 0)
+	functionIDCounter = 0
 }
 
 // ---------------------------------------- OBJECTS
@@ -260,16 +340,16 @@ func MemcoreFunctionRetrieveTyped[T any](id uint32) T {
 //go:inline
 func MemcoreObjectRegister(mark MarkRaw) ObjectID {
 	var id uint32
-
-	if len(objectFreeList) > 0 {
-		id = objectFreeList[len(objectFreeList)-1]
-		objectFreeList = objectFreeList[:len(objectFreeList)-1]
-		objectRegistry[id] = objectEntry{mark, true}
+	if n := len(objectFreeList); n > 0 {
+		id = objectFreeList[n-1]
+		objectFreeList = objectFreeList[:n-1]
+		objectRegistry[id] = mark
+		objectActive[id] = true
 	} else {
 		id = uint32(len(objectRegistry))
-		objectRegistry = append(objectRegistry, objectEntry{mark, true})
+		objectRegistry = append(objectRegistry, mark)
+		objectActive = append(objectActive, true)
 	}
-
 	objectIDCounter++
 	return id
 }
@@ -282,7 +362,7 @@ func MemcoreObjectRebind(id ObjectID, mark MarkRaw) {
 	if int(id) >= len(objectRegistry) {
 		panic("memcore: invalid ObjectID in rebind")
 	}
-	objectRegistry[id] = objectEntry{mark, true}
+	objectRegistry[id] = mark
 }
 
 // MemcoreObjectUnregister removes an object mapping entirely.
@@ -293,7 +373,8 @@ func MemcoreObjectUnregister(id ObjectID) {
 	if int(id) >= len(objectRegistry) {
 		return
 	}
-	objectRegistry[id] = objectEntry{MarkRaw{}, false}
+	objectRegistry[id] = MarkRaw{}
+	objectActive[id] = false
 	objectFreeList = append(objectFreeList, id)
 }
 
@@ -302,25 +383,21 @@ func MemcoreObjectUnregister(id ObjectID) {
 //go:nosplit
 //go:inline
 func MemcoreObjectResolve(id ObjectID) (MarkRaw, bool) {
-	if uintptr(id) >= uintptr(len(objectRegistry)) {
+	if int(id) >= len(objectRegistry) || !objectActive[id] {
 		return MarkRaw{}, false
 	}
-	e := &objectRegistry[id]
-	if !e.active {
-		return MarkRaw{}, false
-	}
-	r := &regionRegistry[e.mark.regionID]
-	if !r.active {
-		e.active = false
+	m := objectRegistry[id]
+	if !regionRegistry[m.regionID].active {
+		objectActive[id] = false
 		objectFreeList = append(objectFreeList, id)
 		return MarkRaw{}, false
 	}
-	return e.mark, true
+	return m, true
 }
 
 // MemcoreObjectRegistryClear resets all object mappings.
 func MemcoreObjectRegistryClear() {
-	objectRegistry = make([]objectEntry, 0)
+	objectRegistry = make([]MarkRaw, 0)
 	objectFreeList = make([]uint32, 0)
 	objectIDCounter = 0
 }
