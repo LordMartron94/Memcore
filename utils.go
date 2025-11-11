@@ -52,3 +52,36 @@ func AlignUp(n, alignment uint64) uint64 {
 	mask := alignment - 1
 	return (n + mask) &^ mask
 }
+
+// NextPowerOfTwo returns the smallest power of two greater than or equal to `x`.
+//
+// If `x` is already a power of two, it is returned unchanged.
+// For example:
+//
+//	NextPowerOfTwo(0)  => 1
+//	NextPowerOfTwo(1)  => 1
+//	NextPowerOfTwo(5)  => 8
+//	NextPowerOfTwo(64) => 64
+//
+// This function uses a branchless bit-twiddling method that runs in constant time
+// and avoids loops or floating-point operations.
+//
+// ⚠️ Range:
+// - For inputs in [0, 2⁶³], the result is always valid.
+// - For inputs in (2⁶³, 2⁶⁴−1], the function overflows to 0 due to bit shifting limits.
+//
+//go:inline
+//go:nosplit
+func NextPowerOfTwo(x uint64) uint64 {
+	if x == 0 {
+		return 1
+	}
+	x--
+	x |= x >> 1
+	x |= x >> 2
+	x |= x >> 4
+	x |= x >> 8
+	x |= x >> 16
+	x |= x >> 32
+	return x + 1
+}
