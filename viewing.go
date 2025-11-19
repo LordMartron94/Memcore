@@ -7,9 +7,7 @@ type MemcoreViewFn func(object MarkRaw) (unsafe.Pointer, uint64)
 
 // Internal registry for these raw views.
 var (
-	viewRegistry  []MemcoreViewFn = make([]MemcoreViewFn, 0)
-	viewFreeList  []uint32        = make([]uint32, 0)
-	viewIDCounter uint32          = 0
+	viewRegistry []MemcoreViewFn = make([]MemcoreViewFn, 0)
 
 	typeIDRegistry        = make(map[uintptr]uint32)
 	typeIDCounter  uint32 = 0
