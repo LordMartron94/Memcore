@@ -2,6 +2,7 @@ package memcore
 
 import (
 	"fmt"
+	"reflect"
 	"unsafe"
 )
 
@@ -191,6 +192,28 @@ func MemcoreMarkDereferenceUnsafe(mark MarkRaw) unsafe.Pointer {
 func MemcoreMarkDereferenceObject[T any](mark MarkRaw) *T {
 	addr := MemcoreMarkDereference(mark)
 	return (*T)(addr)
+}
+
+// MemcoreMarkDereferenceWithType returns a typed pointer via reflect.Type.
+//
+//go:nosplit
+//go:inline
+func MemcoreMarkDereferenceWithType(mark MarkRaw, t reflect.Type) unsafe.Pointer {
+	addr := MemcoreMarkDereference(mark)
+	val := reflect.NewAt(t, addr)
+	return unsafe.Pointer(val.Pointer())
+}
+
+// MemcoreMarkDereferenceWithTypeUnsafe returns a typed pointer via reflect.Type.
+// This variant is pure pointer arithmetic and does not validate whether the
+// region or mark is valid.
+//
+//go:nosplit
+//go:inline
+func MemcoreMarkDereferenceWithTypeUnsafe(mark MarkRaw, t reflect.Type) unsafe.Pointer {
+	addr := MemcoreMarkDereferenceUnsafe(mark)
+	val := reflect.NewAt(t, addr)
+	return unsafe.Pointer(val.Pointer())
 }
 
 // MemcoreMarkDereferenceObjectUnsafe returns the memory marked interpreted as object T.
