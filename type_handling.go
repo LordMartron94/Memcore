@@ -9,8 +9,8 @@ func (m MemcoreType) Type() reflect.Type {
 	return typeRegistry[m]
 }
 
-var typeRegistry map[MemcoreType]reflect.Type
-var reverseTypeRegistry map[reflect.Type]MemcoreType
+var typeRegistry map[MemcoreType]reflect.Type = make(map[MemcoreType]reflect.Type)
+var reverseTypeRegistry map[reflect.Type]MemcoreType = make(map[reflect.Type]MemcoreType)
 
 // MemcoreTypeRetrieve retrieves the MemcoreType for a given Type.
 // If it does not exist yet, it will create it.
