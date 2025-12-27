@@ -115,3 +115,10 @@ func platformMemmapRequestFromFile(fd int, offset int64, length int, protection 
 func platformMemmapPageSizeGet() int {
 	return unix.Getpagesize()
 }
+
+func platformMemmapFileResize(fd int, sizeBytes int64) error {
+	if err := unix.Ftruncate(fd, sizeBytes); err != nil {
+		return fmt.Errorf("ftruncate failed: %w", err)
+	}
+	return nil
+}

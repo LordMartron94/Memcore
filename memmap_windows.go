@@ -231,3 +231,11 @@ func platformMemmapRequestFromFile(fd int, offset int64, length int, protection 
 func platformMemmapPageSizeGet() int {
 	return windows.Getpagesize()
 }
+
+func platformMemmapFileResize(fd int, sizeBytes int64) error {
+	fileHandle := windows.Handle(fd)
+	if err := windows.Ftruncate(fileHandle, sizeBytes); err != nil {
+		return fmt.Errorf("Ftruncate failed: %w", err)
+	}
+	return nil
+}

@@ -57,6 +57,7 @@ Memory regions are registered with `memcore` to enable the mark system:
 - **`MemmapRequestAt`** - Map memory at a specific address (with `MAP_FIXED`)
 - **`MemmapPageSizeGet`** - Get the system page size (required for file offset alignment)
 - **`MemmapAlignOffset`** - Align a file offset to the nearest page boundary
+- **`MemmapFileResize`** - Set or resize a file to a specific size (required before mapping new files)
 
 ### Mark Operations
 
@@ -141,6 +142,8 @@ ptr := memcore.MemcoreMarkDereference(mark)
 
 File-backed mappings enable zero-copy, O(1) access to binary files, essential for vector stores and persistent data structures:
 
+**Initializing a new file for mapping:**
+
 ```go
 import (
     "os"
@@ -148,16 +151,20 @@ import (
     "unsafe"
 )
 
-// Open file for read-write access
-file, err := os.OpenFile("vector_store.bin", os.O_RDWR, 0644)
+// Create or open file for read-write access
+file, err := os.OpenFile("vector_store.bin", os.O_RDWR|os.O_CREATE, 0644)
 if err != nil {
     panic(err)
 }
 defer file.Close()
 
-// Get file size and align offset to page boundary
-fileInfo, _ := file.Stat()
-fileSize := int(fileInfo.Size())
+// Initialize file to desired size (e.g., 100MB for vector store)
+desiredSize := int64(100 * memcore.MegaByte)
+if err := memcore.MemmapFileResize(int(file.Fd()), desiredSize); err != nil {
+    panic(err)
+}
+
+// Align offset to page boundary
 pageSize := memcore.MemmapPageSizeGet()
 alignedOffset := memcore.MemmapAlignOffset(0)
 
@@ -165,7 +172,7 @@ alignedOffset := memcore.MemmapAlignOffset(0)
 fileMap, err := memcore.MemmapRequestFromFile(
     int(file.Fd()),
     alignedOffset,
-    fileSize - int(alignedOffset),
+    int(desiredSize) - int(alignedOffset),
     memcore.PROT_READWRITE,
     memcore.MAP_SHARED, // Changes are visible to other processes and persisted
 )
@@ -190,6 +197,38 @@ baseMark := memcore.MemcoreMarkCreate(regionID, 0)
 if err := memcore.MemmapSync(fileMap, memcore.MS_SYNC); err != nil {
     panic(err)
 }
+```
+
+**Opening an existing file:**
+
+```go
+// Open existing file for read-write access
+file, err := os.OpenFile("vector_store.bin", os.O_RDWR, 0644)
+if err != nil {
+    panic(err)
+}
+defer file.Close()
+
+// Get file size and align offset to page boundary
+fileInfo, _ := file.Stat()
+fileSize := int(fileInfo.Size())
+pageSize := memcore.MemmapPageSizeGet()
+alignedOffset := memcore.MemmapAlignOffset(0)
+
+// Map the file into memory
+fileMap, err := memcore.MemmapRequestFromFile(
+    int(file.Fd()),
+    alignedOffset,
+    fileSize - int(alignedOffset),
+    memcore.PROT_READWRITE,
+    memcore.MAP_SHARED,
+)
+if err != nil {
+    panic(err)
+}
+defer memcore.MemmapUnmap(fileMap)
+
+// Use the mapped file...
 ```
 
 **Important Notes:**

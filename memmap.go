@@ -157,6 +157,7 @@ Edge cases:
 Formula: aligned = (offset + pageSize - 1) &^ (pageSize - 1)
 
 Example:
+
 	pageSize := MemmapPageSizeGet() // 4096
 	aligned := MemmapAlignOffset(5000) // returns 8192
 */
@@ -217,4 +218,41 @@ func MemmapRequestFromFile(fd int, offset int64, length int, protection MemoryPr
 		mmapRegistry.Store(uintptr(unsafe.Pointer(&m[0])), length)
 	}
 	return m, err
+}
+
+/*
+MemmapFileResize sets the size of a file to the specified number of bytes.
+
+This function is required before mapping a file with MemmapRequestFromFile if the file
+does not already exist or is smaller than the desired mapping size. The file must be
+opened with write permissions (O_RDWR or O_WRONLY).
+
+Use cases:
+- Initializing new files for memory-mapped vector stores
+- Pre-allocating space for persistent data structures
+- Resizing existing mapped files before remapping
+
+Time complexity: O(1) - single system call
+Space complexity: O(1) - no allocations
+
+Prerequisites:
+- fd must be a valid file descriptor from os.File.Fd()
+- file must be opened with write permissions (O_RDWR or O_WRONLY)
+- sizeBytes must be >= 0
+
+Edge cases:
+- If sizeBytes is smaller than current file size, file is truncated
+- If sizeBytes is larger than current file size, file is extended (filled with zeros)
+- On Unix, uses ftruncate(2)
+- On Windows, uses Ftruncate which internally uses SetFilePointer + SetEndOfFile
+- Returns error if file descriptor is invalid or lacks write permissions
+
+The file size must be set before calling MemmapRequestFromFile with a length
+that exceeds the current file size.
+*/
+func MemmapFileResize(fd int, sizeBytes int64) error {
+	if sizeBytes < 0 {
+		return fmt.Errorf("invalid file size: %d (must be >= 0)", sizeBytes)
+	}
+	return platformMemmapFileResize(fd, sizeBytes)
 }
