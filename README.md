@@ -46,6 +46,7 @@ Memory regions are registered with `memcore` to enable the mark system:
 ### Memory Mapping Operations
 
 - **`MemmapRequest`** - Map anonymous memory with specified protection and flags
+- **`MemmapRequestFromFile`** - Map a file-backed memory region for zero-copy access
 - **`MemmapUnmap`** - Unmap a memory region
 - **`MemmapProtect`** - Change protection flags (read/write/execute)
 - **`MemmapLock`/`MemmapUnlock`** - Lock pages in RAM (prevent swapping)
@@ -54,6 +55,8 @@ Memory regions are registered with `memcore` to enable the mark system:
 - **`MemmapSync`** - Synchronize memory with backing store (for file-backed mappings)
 - **`MemmapRemap`** - Resize an existing mapping (using `mremap` on Linux)
 - **`MemmapRequestAt`** - Map memory at a specific address (with `MAP_FIXED`)
+- **`MemmapPageSizeGet`** - Get the system page size (required for file offset alignment)
+- **`MemmapAlignOffset`** - Align a file offset to the nearest page boundary
 
 ### Mark Operations
 
@@ -103,6 +106,8 @@ Useful size constants are provided:
 
 ## Example Usage
 
+### Anonymous Memory Mapping
+
 ```go
 import "memcore"
 
@@ -131,6 +136,68 @@ ptr := memcore.MemcoreMarkDereference(mark)
 
 // Use the memory...
 ```
+
+### File-Backed Memory Mapping
+
+File-backed mappings enable zero-copy, O(1) access to binary files, essential for vector stores and persistent data structures:
+
+```go
+import (
+    "os"
+    "memcore"
+    "unsafe"
+)
+
+// Open file for read-write access
+file, err := os.OpenFile("vector_store.bin", os.O_RDWR, 0644)
+if err != nil {
+    panic(err)
+}
+defer file.Close()
+
+// Get file size and align offset to page boundary
+fileInfo, _ := file.Stat()
+fileSize := int(fileInfo.Size())
+pageSize := memcore.MemmapPageSizeGet()
+alignedOffset := memcore.MemmapAlignOffset(0)
+
+// Map the file into memory
+fileMap, err := memcore.MemmapRequestFromFile(
+    int(file.Fd()),
+    alignedOffset,
+    fileSize - int(alignedOffset),
+    memcore.PROT_READWRITE,
+    memcore.MAP_SHARED, // Changes are visible to other processes and persisted
+)
+if err != nil {
+    panic(err)
+}
+defer memcore.MemmapUnmap(fileMap)
+
+// Register as a region for use with memstruct
+regionID := memcore.MemcoreRegionRegister(
+    uintptr(unsafe.Pointer(&fileMap[0])),
+    uint64(len(fileMap)),
+)
+
+// Create a mark to the start of the mapped file
+baseMark := memcore.MemcoreMarkCreate(regionID, 0)
+
+// Access data structures directly in the file (zero-copy, O(1))
+// Changes are automatically synced to disk with MAP_SHARED
+
+// Explicitly sync changes to disk when needed
+if err := memcore.MemmapSync(fileMap, memcore.MS_SYNC); err != nil {
+    panic(err)
+}
+```
+
+**Important Notes:**
+- File offsets must be page-aligned (use `MemmapAlignOffset`)
+- File descriptor must remain open for the lifetime of the mapping
+- `MAP_SHARED`: writes are visible to other processes and persisted to disk
+- `MAP_PRIVATE`: creates copy-on-write mapping, changes not visible to others
+- Use `MemmapSync` to ensure writes are flushed to disk
 
 ## Dependencies
 

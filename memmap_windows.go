@@ -174,3 +174,60 @@ func platformMemmapUnmapAt(addr unsafe.Pointer, byteAmount int) error {
 	}
 	return nil
 }
+
+func platformMemmapRequestFromFile(fd int, offset int64, length int, protection MemoryProtectionFlag, flags MemoryMapFlag) (MemoryMap, error) {
+	if length <= 0 {
+		return nil, fmt.Errorf("invalid mapping length: %d", length)
+	}
+
+	// Convert file descriptor to Windows handle
+	fileHandle := windows.Handle(fd)
+
+	// Map protection flags to Windows page protection constants
+	var pageProt uint32
+	var fileAccess uint32
+
+	switch protection {
+	case PROT_READ:
+		pageProt = windows.PAGE_READONLY
+		fileAccess = windows.FILE_MAP_READ
+	case PROT_WRITE, PROT_READWRITE:
+		pageProt = windows.PAGE_READWRITE
+		fileAccess = windows.FILE_MAP_WRITE | windows.FILE_MAP_READ
+	case PROT_EXEC:
+		pageProt = windows.PAGE_EXECUTE_READ
+		fileAccess = windows.FILE_MAP_READ | windows.FILE_MAP_EXECUTE
+	case PROT_ALL:
+		pageProt = windows.PAGE_EXECUTE_READWRITE
+		fileAccess = windows.FILE_MAP_READ | windows.FILE_MAP_WRITE | windows.FILE_MAP_EXECUTE
+	default:
+		pageProt = windows.PAGE_READWRITE
+		fileAccess = windows.FILE_MAP_WRITE | windows.FILE_MAP_READ
+	}
+
+	// Calculate high and low DWORDs for offset
+	offsetHigh := uint32(offset >> 32)
+	offsetLow  := uint32(offset & 0xFFFFFFFF)
+
+	// Create file mapping object
+	// Passing 0,0 for maxSize uses the actual file size
+	h, err := windows.CreateFileMapping(fileHandle, nil, pageProt, 0, 0, nil)
+	if err != nil {
+		return nil, fmt.Errorf("CreateFileMapping failed: %w", err)
+	}
+	defer windows.CloseHandle(h)
+
+	// Map view of file with specified offset
+	addr, err := windows.MapViewOfFile(h, fileAccess, offsetHigh, offsetLow, uintptr(length))
+	if err != nil {
+		return nil, fmt.Errorf("MapViewOfFile failed: %w", err)
+	}
+
+	// Create slice over the mapped memory
+	data := unsafe.Slice((*byte)(unsafe.Pointer(addr)), length)
+	return MemoryMap(data), nil
+}
+
+func platformMemmapPageSizeGet() int {
+	return windows.Getpagesize()
+}
