@@ -7,7 +7,8 @@ import (
 )
 
 var (
-	regionRegistry []memoryRegion = make([]memoryRegion, 0)
+	// Initialize with one empty/inactive region so the first real region gets ID 1
+	regionRegistry []memoryRegion = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
 	regionFreeList []uint32       = make([]uint32, 0)
 	regionBases    []uintptr      = make([]uintptr, 0)
 
@@ -27,7 +28,7 @@ func MemcoreMarkManagementStateReset(resetFunctions bool) {
 		MemcoreFunctionRegistryClear()
 	}
 
-	regionRegistry = make([]memoryRegion, 0)
+	regionRegistry = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
 	regionFreeList = make([]uint32, 0)
 	regionBases = make([]uintptr, 0)
 
