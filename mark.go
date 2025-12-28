@@ -10,7 +10,7 @@ var (
 	// Initialize with one empty/inactive region so the first real region gets ID 1
 	regionRegistry []memoryRegion = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
 	regionFreeList []uint32       = make([]uint32, 0)
-	regionBases    []uintptr      = make([]uintptr, 0)
+	regionBases    []uintptr      = []uintptr{0}
 
 	functionRegistry  []interface{} = make([]interface{}, 0)
 	functionFreeList  []uint32      = make([]uint32, 0)
@@ -30,7 +30,7 @@ func MemcoreMarkManagementStateReset(resetFunctions bool) {
 
 	regionRegistry = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
 	regionFreeList = make([]uint32, 0)
-	regionBases = make([]uintptr, 0)
+	regionBases = []uintptr{0}
 
 	MemcoreObjectRegistryClear()
 }
