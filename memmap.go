@@ -87,6 +87,7 @@ func MemmapUnmapAt(addr unsafe.Pointer, byteAmount int) error {
 	if err == nil {
 		mmapRegistry.Delete(uintptr(addr))
 	}
+
 	return err
 }
 
