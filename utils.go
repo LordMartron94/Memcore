@@ -85,3 +85,23 @@ func NextPowerOfTwo(x uint64) uint64 {
 	x |= x >> 32
 	return x + 1
 }
+
+// IsAligned reports whether the given pointer is aligned to `alignment` bytes.
+//
+// The alignment must be a power of two.
+// This function performs a pure address check and does not inspect memory.
+//
+// Typical use cases:
+// - SIMD kernel precondition checks
+// - Asserting allocator guarantees
+// - Selecting aligned vs unaligned fast paths
+//
+//go:inline
+//go:nosplit
+func IsAligned(ptr unsafe.Pointer, alignment uint64) bool {
+	if alignment&(alignment-1) != 0 {
+		panic("alignment must be power of two")
+	}
+
+	return uintptr(ptr)&uintptr(alignment-1) == 0
+}
