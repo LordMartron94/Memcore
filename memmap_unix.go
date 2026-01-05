@@ -103,3 +103,22 @@ func platformMemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection Mem
 	}
 	return p, nil
 }
+
+func platformMemmapRequestFromFile(fd int, offset int64, length int, protection MemoryProtectionFlag, flags MemoryMapFlag) (MemoryMap, error) {
+	mmap, err := unix.Mmap(fd, offset, length, int(protection), int(flags))
+	if err != nil {
+		return nil, fmt.Errorf("file-backed memory map failed: %w", err)
+	}
+	return MemoryMap(mmap), nil
+}
+
+func platformMemmapPageSizeGet() int {
+	return unix.Getpagesize()
+}
+
+func platformMemmapFileResize(fd int, sizeBytes int64) error {
+	if err := unix.Ftruncate(fd, sizeBytes); err != nil {
+		return fmt.Errorf("ftruncate failed: %w", err)
+	}
+	return nil
+}
