@@ -6,16 +6,21 @@ import (
 	"unsafe"
 )
 
+type funcKey struct {
+	ptr uintptr
+	typ reflect.Type
+}
+
 var (
 	// Initialize with one empty/inactive region so the first real region gets ID 1
 	regionRegistry []memoryRegion = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
 	regionFreeList []uint32       = make([]uint32, 0)
 	regionBases    []uintptr      = []uintptr{0}
 
-	functionRegistry      []interface{} = make([]interface{}, 0)
-	functionFreeList      []uint32      = make([]uint32, 0)
-	functionIDCounter     uint32        = 0
-	functionPointerMap    map[uintptr]FunctionID = make(map[uintptr]FunctionID)
+	functionRegistry  []interface{} = make([]interface{}, 0)
+	functionFreeList  []uint32      = make([]uint32, 0)
+	functionIDCounter uint32        = 0
+	functionKeyMap                  = make(map[funcKey]FunctionID)
 
 	objectRegistry  []MarkRaw = make([]MarkRaw, 0)
 	objectFreeList  []uint32  = make([]uint32, 0)
@@ -289,8 +294,10 @@ func MemcoreFunctionRegister(fn interface{}) FunctionID {
 		id = uint32(len(functionRegistry))
 		functionRegistry = append(functionRegistry, fn)
 	}
-	fnPtr := reflect.ValueOf(fn).Pointer()
-	functionPointerMap[fnPtr] = id
+
+	ptr := reflect.ValueOf(fn).Pointer()
+	typ := reflect.TypeOf(fn)
+	functionKeyMap[funcKey{ptr: ptr, typ: typ}] = id
 	return id
 }
 
@@ -308,13 +315,15 @@ func MemcoreFunctionRegisterTyped[T any](function T) FunctionID {
 //go:nosplit
 //go:inline
 func MemcoreFunctionGetID(fn interface{}) (FunctionID, bool) {
-	fnPtr := reflect.ValueOf(fn).Pointer()
-	id, ok := functionPointerMap[fnPtr]
+	ptr := reflect.ValueOf(fn).Pointer()
+	typ := reflect.TypeOf(fn)
+
+	id, ok := functionKeyMap[funcKey{ptr: ptr, typ: typ}]
 	if !ok {
 		return 0, false
 	}
 	if int(id) >= len(functionRegistry) || functionRegistry[id] == nil {
-		delete(functionPointerMap, fnPtr)
+		delete(functionKeyMap, funcKey{ptr: ptr, typ: typ})
 		return 0, false
 	}
 	return id, true
@@ -340,14 +349,18 @@ func MemcoreFunctionRebind(id FunctionID, fn interface{}) {
 	if int(id) >= len(functionRegistry) {
 		panic("memcore: invalid FunctionID in rebind")
 	}
+
 	oldFn := functionRegistry[id]
 	if oldFn != nil {
-		oldFnPtr := reflect.ValueOf(oldFn).Pointer()
-		delete(functionPointerMap, oldFnPtr)
+		oldPtr := reflect.ValueOf(oldFn).Pointer()
+		oldTyp := reflect.TypeOf(oldFn)
+		delete(functionKeyMap, funcKey{ptr: oldPtr, typ: oldTyp})
 	}
+
 	functionRegistry[id] = fn
-	fnPtr := reflect.ValueOf(fn).Pointer()
-	functionPointerMap[fnPtr] = id
+	ptr := reflect.ValueOf(fn).Pointer()
+	typ := reflect.TypeOf(fn)
+	functionKeyMap[funcKey{ptr: ptr, typ: typ}] = id
 }
 
 // MemcoreFunctionUnregister removes a function entry.
@@ -358,11 +371,14 @@ func MemcoreFunctionUnregister(id FunctionID) {
 	if int(id) >= len(functionRegistry) {
 		return
 	}
+
 	fn := functionRegistry[id]
 	if fn != nil {
-		fnPtr := reflect.ValueOf(fn).Pointer()
-		delete(functionPointerMap, fnPtr)
+		ptr := reflect.ValueOf(fn).Pointer()
+		typ := reflect.TypeOf(fn)
+		delete(functionKeyMap, funcKey{ptr: ptr, typ: typ})
 	}
+
 	functionRegistry[id] = nil
 	functionFreeList = append(functionFreeList, id)
 }
@@ -396,10 +412,9 @@ func MemcoreFunctionRetrieveTyped[T any](id FunctionID) T {
 
 // MemcoreFunctionRegistryClear resets all registered functions.
 func MemcoreFunctionRegistryClear() {
-	functionRegistry   = make([]interface{}, 0)
-	functionFreeList   = make([]uint32, 0)
-	functionIDCounter  = 0
-	functionPointerMap = make(map[uintptr]FunctionID)
+	functionRegistry = make([]interface{}, 0)
+	functionFreeList = make([]uint32, 0)
+	functionKeyMap = make(map[funcKey]FunctionID)
 }
 
 // ---------------------------------------- OBJECTS
