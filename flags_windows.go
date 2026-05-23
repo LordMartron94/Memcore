@@ -27,7 +27,11 @@ const (
 	MAP_ANON_PRIVATE MemoryMapFlag = MAP_PRIVATE | MAP_ANONYMOUS
 	MAP_ANON_SHARED  MemoryMapFlag = MAP_SHARED | MAP_ANONYMOUS
 
-	// Dummy remap flags
+	MS_ASYNC      MemorySyncFlag = 1
+	MS_SYNC       MemorySyncFlag = 4
+	MS_INVALIDATE MemorySyncFlag = 2
+
+	// Remap flag values are not used by the kernel on Windows; memmap_windows.go emulates mremap.
 	MREMAP_MAYMOVE   MemoryRemapFlag = 1
 	MREMAP_FIXED     MemoryRemapFlag = 2
 	MREMAP_DONTUNMAP MemoryRemapFlag = 4

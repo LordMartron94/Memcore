@@ -1,11 +1,12 @@
-//go:build linux
+//go:build darwin
 
 package memcore
 
 import (
 	"fmt"
-	"golang.org/x/sys/unix"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 func platformMemmapRequest(byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (MemoryMap, error) {
@@ -80,20 +81,41 @@ func platformMemmapSync(memmap MemoryMap, syncFlags MemorySyncFlag) error {
 }
 
 func platformMemmapRemap(memmap MemoryMap, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
-	newMap, err := unix.Mremap(memmap, newSize, int(flags))
-	if err != nil {
-		return nil, fmt.Errorf("mremap failed: %w", err)
+	_ = flags
+	if newSize <= 0 {
+		return nil, fmt.Errorf("invalid new size: %d", newSize)
 	}
-	return MemoryMap(newMap), nil
+
+	newMap, err := platformMemmapRequest(newSize, PROT_READWRITE, MAP_ANON_PRIVATE)
+	if err != nil {
+		return nil, err
+	}
+	copy(newMap, memmap)
+	if err := platformMemmapUnmap(memmap); err != nil {
+		return nil, err
+	}
+	return newMap, nil
 }
 
 func platformMemmapRemapAt(addr unsafe.Pointer, oldSize, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
-	newPtr, err := unix.MremapPtr(addr, uintptr(oldSize), nil, uintptr(newSize), int(flags))
-	if err != nil {
-		return nil, fmt.Errorf("mremap at fixed address failed: %w", err)
+	_ = flags
+	if newSize <= 0 {
+		return nil, fmt.Errorf("invalid new size: %d", newSize)
 	}
 
-	return unsafe.Slice((*byte)(newPtr), newSize), nil
+	newMap, err := platformMemmapRequest(newSize, PROT_READWRITE, MAP_ANON_PRIVATE)
+	if err != nil {
+		return nil, err
+	}
+
+	oldSlice := unsafe.Slice((*byte)(addr), oldSize)
+	copy(newMap, oldSlice)
+
+	if err := platformMemmapUnmapAt(addr, oldSize); err != nil {
+		return nil, err
+	}
+
+	return newMap, nil
 }
 
 func platformMemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (unsafe.Pointer, error) {

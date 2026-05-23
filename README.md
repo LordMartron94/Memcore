@@ -241,7 +241,7 @@ defer memcore.MemmapUnmap(fileMap)
 ## Dependencies
 
 - Platform-specific implementations require `golang.org/x/sys/unix` (for Unix) or Windows syscalls (for Windows)
-- Build tags control platform-specific code (`//go:build unix` and `//go:build windows`)
+- Build tags control platform-specific code (`//go:build linux`, `//go:build darwin`, and `//go:build windows`)
 
 ## Relationship to Other Libraries
 
