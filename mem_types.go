@@ -1,5 +1,8 @@
 package memcore
 
+/*
+MemoryUnitBytes names powers-of-two byte scales for capacity calculations.
+*/
 type MemoryUnitBytes uint64
 
 const (

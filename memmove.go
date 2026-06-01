@@ -2,18 +2,27 @@ package memcore
 
 import "unsafe"
 
-// MemoryMoveNoHeapPointers copies n bytes between two regions known to
-// contain no Go heap pointers. It automatically selects the optimal path
-// for size and overlap safety.
-//
-// For n <= 8, it uses direct register moves (1–2 instructions).
-// For larger sizes, it calls the runtime's highly optimized memmove.
+/*
+MemoryMoveNoHeapPointers copies n bytes from src to dst without GC write barriers.
+
+[Context]
+Safe only when both regions contain no Go heap pointers. Handles overlap via runtime memmove for n > 8.
+
+[Parameters]
+dst, src - Region bases; identical pointers are a no-op.
+n - Byte count; zero is a no-op.
+
+[Complexity]
+Time: O(n). Space: O(1).
+
+[Side Effects]
+Mutates dst for n > 0 when dst != src.
+*/
 func MemoryMoveNoHeapPointers(dst, src unsafe.Pointer, n uintptr) {
 	if n == 0 || dst == src {
 		return
 	}
 
-	// Handle tiny copies inline — minimal branch and loop overhead.
 	switch n {
 	case 1:
 		*(*uint8)(dst) = *(*uint8)(src)
@@ -29,7 +38,6 @@ func MemoryMoveNoHeapPointers(dst, src unsafe.Pointer, n uintptr) {
 		return
 	}
 
-	// For anything larger, rely on memmove’s tuned vectorized copy.
 	memmoveInternal(dst, src, n)
 }
 

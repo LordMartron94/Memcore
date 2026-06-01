@@ -2,10 +2,11 @@ package memcore
 
 import "unsafe"
 
-// MemcoreViewFn returns the pointer and length of a raw object for read-only access.
+/*
+MemcoreViewFn exposes a zero-copy (pointer, length) view of a MarkRaw-backed object.
+*/
 type MemcoreViewFn func(object MarkRaw) (unsafe.Pointer, uint64)
 
-// Internal registry for these raw views.
 var (
 	viewRegistry []MemcoreViewFn = make([]MemcoreViewFn, 0)
 
@@ -13,8 +14,12 @@ var (
 	typeIDCounter  uint32 = 0
 )
 
-// MemcoreViewRegister registers a zero-copy raw-view getter for a type.
-//
+/*
+MemcoreViewRegister installs fn as the raw view getter for type T.
+
+[Side Effects]
+Grows viewRegistry as needed; overwrites any prior registration for T.
+*/
 //go:nosplit
 //go:inline
 func MemcoreViewRegister[T any](fn MemcoreViewFn) {
@@ -26,8 +31,9 @@ func MemcoreViewRegister[T any](fn MemcoreViewFn) {
 	viewRegistry[typeID] = fn
 }
 
-// MemcoreViewGet retrieves the registered view getter for a type.
-//
+/*
+MemcoreViewGet returns the registered view getter for T, or nil if none.
+*/
 //go:nosplit
 //go:inline
 func MemcoreViewGet[T any]() MemcoreViewFn {
@@ -38,9 +44,15 @@ func MemcoreViewGet[T any]() MemcoreViewFn {
 	return viewRegistry[typeID]
 }
 
-// MemcoreView returns a zero-copy pointer+length pair for a MarkRaw object.
-// No allocation occurs.
-//
+/*
+MemcoreView invokes the registered getter for T on mark v without allocating.
+
+[Errors]
+Panics when no view was registered for T.
+
+[Returns]
+Pointer and byte length suitable for read-only iteration.
+*/
 //go:nosplit
 //go:inline
 func MemcoreView[T any](v MarkRaw) (unsafe.Pointer, uint64) {

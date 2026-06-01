@@ -17,10 +17,9 @@ var (
 	regionFreeList []uint32       = make([]uint32, 0)
 	regionBases    []uintptr      = []uintptr{0}
 
-	functionRegistry  []interface{} = make([]interface{}, 0)
-	functionFreeList  []uint32      = make([]uint32, 0)
-	functionIDCounter uint32        = 0
-	functionKeyMap                  = make(map[funcKey]FunctionID)
+	functionRegistry []interface{} = make([]interface{}, 0)
+	functionFreeList []uint32      = make([]uint32, 0)
+	functionKeyMap                 = make(map[funcKey]FunctionID)
 
 	objectRegistry  []MarkRaw = make([]MarkRaw, 0)
 	objectFreeList  []uint32  = make([]uint32, 0)
@@ -28,7 +27,15 @@ var (
 	objectIDCounter uint32    = 0
 )
 
-// MemcoreMarkManagementStateReset resets the state to preserve memory.
+/*
+MemcoreMarkManagementStateReset clears region, object, and optionally function registries.
+
+[Parameters]
+resetFunctions - When true, also clears the function registry via MemcoreFunctionRegistryClear.
+
+[Side Effects]
+Resets global mark management state; existing region IDs, object IDs, and marks become invalid.
+*/
 func MemcoreMarkManagementStateReset(resetFunctions bool) {
 	if resetFunctions {
 		MemcoreFunctionRegistryClear()
@@ -41,18 +48,32 @@ func MemcoreMarkManagementStateReset(resetFunctions bool) {
 	MemcoreObjectRegistryClear()
 }
 
+/*
+FunctionID identifies a registered callback stored in the memcore function registry.
+*/
 type FunctionID = uint32
+
+/*
+ObjectID identifies a MarkRaw registered in the memcore object registry.
+*/
 type ObjectID = uint32
 
-// memoryRegion provides information necessary to interact with memory regions.
 type memoryRegion struct {
 	base      uintptr
 	sizeBytes uint64
 	active    bool
 }
 
-// MarkRaw provides the basic information necessary to interact with raw memory.
-// It is the fastest, but also the most unsafe.
+/*
+MarkRaw is an opaque (regionID, offset) handle to manual memory outside the Go heap.
+
+[Context]
+Preferred representation for memforge and other manual allocators: dereference via
+MemcoreMarkDereference rather than retaining raw uintptrs across growth or remap.
+
+[Invariants]
+Marks are only valid while their region is registered and active. Unsafe variants skip checks.
+*/
 type MarkRaw struct {
 	regionID uint32
 	offset   uintptr
@@ -60,8 +81,19 @@ type MarkRaw struct {
 
 // ---------------------------------------- REGIONS
 
-// MemcoreRegionRegister registers a memory region and returns the ID.
-//
+/*
+MemcoreRegionRegister records a contiguous manual memory span and returns its region ID.
+
+[Parameters]
+baseAddr - Base address of the mapping or arena.
+sizeBytes - Extent of the region in bytes.
+
+[Returns]
+A region ID used when creating marks with MemcoreMarkCreate.
+
+[Complexity]
+Time: O(1) amortized. Space: O(1) per registration.
+*/
 //go:nosplit
 //go:inline
 func MemcoreRegionRegister(baseAddr uintptr, sizeBytes uint64) uint32 {
@@ -79,8 +111,15 @@ func MemcoreRegionRegister(baseAddr uintptr, sizeBytes uint64) uint32 {
 	return id
 }
 
-// MemcoreRegionUnregister removes a memory region.
-//
+/*
+MemcoreRegionUnregister deactivates a region and recycles its ID.
+
+[Parameters]
+regionID - Previously returned by MemcoreRegionRegister.
+
+[Side Effects]
+Marks in this region become invalid for MemcoreMarkDereference; no-op if regionID is out of range.
+*/
 //go:nosplit
 //go:inline
 func MemcoreRegionUnregister(regionID uint32) {
@@ -99,8 +138,12 @@ func MemcoreRegionUnregister(regionID uint32) {
 	regionFreeList = append(regionFreeList, regionID)
 }
 
-// MemcoreRegionBaseUpdate updates the base address of a region.
-//
+/*
+MemcoreRegionBaseUpdate changes the base address of a registered region after remap or relocation.
+
+[Context]
+Call when mremap or similar moves the mapping but marks keep the same region ID and offsets.
+*/
 //go:nosplit
 //go:inline
 func MemcoreRegionBaseUpdate(regionID uint32, newBase uintptr) {
@@ -110,8 +153,12 @@ func MemcoreRegionBaseUpdate(regionID uint32, newBase uintptr) {
 
 // ---------------------------------------- MARKS
 
-// MemcoreMarkCreate creates a marker to memory.
-//
+/*
+MemcoreMarkCreate builds a mark at offset within regionID.
+
+[Returns]
+A MarkRaw with no validation that regionID is active or offset is in bounds.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkCreate(regionID uint32, offset uintptr) MarkRaw {
@@ -122,8 +169,9 @@ func MemcoreMarkCreate(regionID uint32, offset uintptr) MarkRaw {
 	return mark
 }
 
-// MemcoreMarkOffsetFrom creates a new mark relative to another mark.
-//
+/*
+MemcoreMarkOffsetFrom returns a mark at base.offset plus offset in the same region.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkOffsetFrom(base MarkRaw, offset uintptr) MarkRaw {
@@ -133,31 +181,29 @@ func MemcoreMarkOffsetFrom(base MarkRaw, offset uintptr) MarkRaw {
 	}
 }
 
-// MemcoreMarkSubtractBaseOffset removes a base offset from the mark's offset.
-// This is useful to compute an internal offset relative to a base.
-//
+/*
+MemcoreMarkSubtractBaseOffset returns mark.offset minus baseOffset for arena-relative indices.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkSubtractBaseOffset(mark MarkRaw, baseOffset uintptr) uintptr {
 	return mark.offset - baseOffset
 }
 
-// MemcoreMarkAlignedOffsetFrom creates a new mark relative to another mark,
-// rounding the resulting offset up to the specified alignment.
-//
-// This is useful when placing objects or structures that require specific
-// alignment boundaries (e.g. 8, 16, or 64 bytes) within the same memory region.
-//
-// The alignment must be a power of two.
-//
-// Example:
-//
-//	base := MemcoreMarkCreate(regionID, 0)
-//	aligned := MemcoreMarkAlignedOffsetFrom(base, 13, 8)
-//	// aligned.offset == 16
-//
-// It also returns the padding that occured because of the alignment.
-//
+/*
+MemcoreMarkAlignedOffsetFrom advances base by offset then rounds up to alignment.
+
+[Parameters]
+alignment - Must be a power of two.
+
+[Returns]
+The aligned mark and padding bytes inserted before the aligned offset.
+
+[Example]
+	base := MemcoreMarkCreate(regionID, 0)
+	aligned, padding := MemcoreMarkAlignedOffsetFrom(base, 13, 8)
+	// aligned.offset == 16, padding == 3
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkAlignedOffsetFrom(base MarkRaw, offset uintptr, alignment uint64) (MarkRaw, uint64) {
@@ -170,8 +216,15 @@ func MemcoreMarkAlignedOffsetFrom(base MarkRaw, offset uintptr, alignment uint64
 	}, padding
 }
 
-// MemcoreMarkDereference returns a pointer to the memory marked.
-//
+/*
+MemcoreMarkDereference resolves a mark to an unsafe.Pointer in the registered region.
+
+[Errors]
+Panics if the region is inactive or regionID is invalid.
+
+[Side Effects]
+Pure aside from the panic path; does not mutate memory.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereference(mark MarkRaw) unsafe.Pointer {
@@ -182,18 +235,21 @@ func MemcoreMarkDereference(mark MarkRaw) unsafe.Pointer {
 	return unsafe.Pointer(r.base + mark.offset)
 }
 
-// MemcoreMarkDereferenceUnsafe returns a pointer to the memory marked.
-// This variant is pure pointer arithmetic and does not validate whether the
-// region or mark is valid.
-//
+/*
+MemcoreMarkDereferenceUnsafe resolves a mark using cached region bases without active checks.
+
+[Invariants]
+Invalid regionID or offset produces undefined behavior rather than a guaranteed panic.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceUnsafe(mark MarkRaw) unsafe.Pointer {
 	return unsafe.Pointer(regionBases[mark.regionID] + mark.offset)
 }
 
-// MemcoreMarkDereferenceObject returns the memory marked interpreted as object T.
-//
+/*
+MemcoreMarkDereferenceObject returns *T at the mark via MemcoreMarkDereference.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceObject[T any](mark MarkRaw) *T {
@@ -201,8 +257,9 @@ func MemcoreMarkDereferenceObject[T any](mark MarkRaw) *T {
 	return (*T)(addr)
 }
 
-// MemcoreMarkDereferenceWithType returns a typed pointer via reflect.Type.
-//
+/*
+MemcoreMarkDereferenceWithType returns a reflect-typed pointer at the mark.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceWithType(mark MarkRaw, t reflect.Type) unsafe.Pointer {
@@ -211,10 +268,9 @@ func MemcoreMarkDereferenceWithType(mark MarkRaw, t reflect.Type) unsafe.Pointer
 	return unsafe.Pointer(val.Pointer())
 }
 
-// MemcoreMarkDereferenceWithTypeUnsafe returns a typed pointer via reflect.Type.
-// This variant is pure pointer arithmetic and does not validate whether the
-// region or mark is valid.
-//
+/*
+MemcoreMarkDereferenceWithTypeUnsafe is the unchecked variant of MemcoreMarkDereferenceWithType.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceWithTypeUnsafe(mark MarkRaw, t reflect.Type) unsafe.Pointer {
@@ -223,10 +279,9 @@ func MemcoreMarkDereferenceWithTypeUnsafe(mark MarkRaw, t reflect.Type) unsafe.P
 	return unsafe.Pointer(val.Pointer())
 }
 
-// MemcoreMarkDereferenceObjectUnsafe returns the memory marked interpreted as object T.
-// This variant is pure pointer arithmetic and does not validate whether the
-// region or mark is valid.
-//
+/*
+MemcoreMarkDereferenceObjectUnsafe returns *T via MemcoreMarkDereferenceUnsafe.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceObjectUnsafe[T any](mark MarkRaw) *T {
@@ -234,8 +289,9 @@ func MemcoreMarkDereferenceObjectUnsafe[T any](mark MarkRaw) *T {
 	return (*T)(addr)
 }
 
-// MemcoreMarkDereferenceObjectAlt returns the memory marked interpreted as object T as well as the raw pointer.
-//
+/*
+MemcoreMarkDereferenceObjectAlt returns both the raw pointer and *T at the mark.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceObjectAlt[T any](mark MarkRaw) (unsafe.Pointer, *T) {
@@ -243,10 +299,9 @@ func MemcoreMarkDereferenceObjectAlt[T any](mark MarkRaw) (unsafe.Pointer, *T) {
 	return addr, (*T)(addr)
 }
 
-// MemcoreMarkDereferenceObjectAltUnsafe returns the memory marked interpreted as object T as well as the raw pointer.
-// This variant is pure pointer arithmetic and does not validate whether the
-// region or mark is valid.
-//
+/*
+MemcoreMarkDereferenceObjectAltUnsafe is the unchecked variant of MemcoreMarkDereferenceObjectAlt.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceObjectAltUnsafe[T any](mark MarkRaw) (unsafe.Pointer, *T) {
@@ -254,24 +309,27 @@ func MemcoreMarkDereferenceObjectAltUnsafe[T any](mark MarkRaw) (unsafe.Pointer,
 	return addr, (*T)(addr)
 }
 
-// MemcoreMarkIsValid reports whether the mark references a valid region.
-//
+/*
+MemcoreMarkIsValid reports whether mark.regionID refers to an active region.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkIsValid(m MarkRaw) bool {
 	return int(m.regionID) < len(regionRegistry) && regionRegistry[m.regionID].active
 }
 
-// MemcoreMarkOffsetIs checks whether an offset is the same as the target.
-//
+/*
+MemcoreMarkOffsetIs reports whether m.offset equals offset.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkOffsetIs(m MarkRaw, offset uintptr) bool {
 	return m.offset == offset
 }
 
-// MemcoreMarkBelongsToRegion returns true if both marks refer to the same region.
-//
+/*
+MemcoreMarkBelongsToRegion reports whether m and other share the same regionID.
+*/
 //go:nosplit
 //go:inline
 func MemcoreMarkBelongsToRegion(m MarkRaw, other MarkRaw) bool {
@@ -280,8 +338,12 @@ func MemcoreMarkBelongsToRegion(m MarkRaw, other MarkRaw) bool {
 
 // ---------------------------------------- FUNCTIONS
 
-// MemcoreFunctionRegister registers a function and returns its ID.
-//
+/*
+MemcoreFunctionRegister stores fn in the global function table and returns its ID.
+
+[Side Effects]
+Indexes fn by reflect pointer and type for later MemcoreFunctionGetID lookups.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionRegister(fn interface{}) FunctionID {
@@ -301,17 +363,21 @@ func MemcoreFunctionRegister(fn interface{}) FunctionID {
 	return id
 }
 
-// MemcoreFunctionRegisterTyped registers a strongly typed function and returns its ID.
-//
+/*
+MemcoreFunctionRegisterTyped registers a typed function and returns its FunctionID.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionRegisterTyped[T any](function T) FunctionID {
 	return MemcoreFunctionRegister(function)
 }
 
-// MemcoreFunctionGetID checks if a function is already registered and returns its ID.
-// Returns the FunctionID and true if found, or 0 and false if not registered.
-//
+/*
+MemcoreFunctionGetID looks up a previously registered function by identity.
+
+[Returns]
+The FunctionID and true if found; 0 and false if not registered or slot was cleared.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionGetID(fn interface{}) (FunctionID, bool) {
@@ -329,9 +395,9 @@ func MemcoreFunctionGetID(fn interface{}) (FunctionID, bool) {
 	return id, true
 }
 
-// MemcoreFunctionRegisterOrGet checks if a function is already registered.
-// If found, returns the existing ID. Otherwise, registers the function and returns the new ID.
-//
+/*
+MemcoreFunctionRegisterOrGet returns an existing ID for fn or registers it.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionRegisterOrGet(fn interface{}) FunctionID {
@@ -341,8 +407,12 @@ func MemcoreFunctionRegisterOrGet(fn interface{}) FunctionID {
 	return MemcoreFunctionRegister(fn)
 }
 
-// MemcoreFunctionRebind updates an existing function entry.
-//
+/*
+MemcoreFunctionRebind replaces the function stored at id and updates the identity map.
+
+[Errors]
+Panics if id is out of range.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionRebind(id FunctionID, fn interface{}) {
@@ -363,8 +433,9 @@ func MemcoreFunctionRebind(id FunctionID, fn interface{}) {
 	functionKeyMap[funcKey{ptr: ptr, typ: typ}] = id
 }
 
-// MemcoreFunctionUnregister removes a function entry.
-//
+/*
+MemcoreFunctionUnregister clears slot id and recycles it; no-op if id is out of range.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionUnregister(id FunctionID) {
@@ -383,8 +454,9 @@ func MemcoreFunctionUnregister(id FunctionID) {
 	functionFreeList = append(functionFreeList, id)
 }
 
-// MemcoreFunctionRetrieve retrieves a raw function by ID.
-//
+/*
+MemcoreFunctionRetrieve returns the raw function at id or nil if out of range.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionRetrieve(id FunctionID) interface{} {
@@ -394,8 +466,12 @@ func MemcoreFunctionRetrieve(id FunctionID) interface{} {
 	return functionRegistry[id]
 }
 
-// MemcoreFunctionRetrieveTyped retrieves a function and casts it to type T.
-//
+/*
+MemcoreFunctionRetrieveTyped returns the function at id cast to T.
+
+[Errors]
+Panics if the slot is inactive or the stored value is not assignable to T.
+*/
 //go:nosplit
 //go:inline
 func MemcoreFunctionRetrieveTyped[T any](id FunctionID) T {
@@ -410,7 +486,9 @@ func MemcoreFunctionRetrieveTyped[T any](id FunctionID) T {
 	return v
 }
 
-// MemcoreFunctionRegistryClear resets all registered functions.
+/*
+MemcoreFunctionRegistryClear drops all registered functions and the identity map.
+*/
 func MemcoreFunctionRegistryClear() {
 	functionRegistry = make([]interface{}, 0)
 	functionFreeList = make([]uint32, 0)
@@ -419,8 +497,12 @@ func MemcoreFunctionRegistryClear() {
 
 // ---------------------------------------- OBJECTS
 
-// MemcoreObjectRegister assigns a new ObjectID and links it to a MarkRaw.
-//
+/*
+MemcoreObjectRegister assigns a new ObjectID to mark.
+
+[Returns]
+A recycled or newly allocated ObjectID.
+*/
 //go:nosplit
 //go:inline
 func MemcoreObjectRegister(mark MarkRaw) ObjectID {
@@ -439,8 +521,12 @@ func MemcoreObjectRegister(mark MarkRaw) ObjectID {
 	return id
 }
 
-// MemcoreObjectRebind updates an existing ObjectID → MarkRaw mapping.
-//
+/*
+MemcoreObjectRebind updates the mark stored at id.
+
+[Errors]
+Panics if id is out of range.
+*/
 //go:nosplit
 //go:inline
 func MemcoreObjectRebind(id ObjectID, mark MarkRaw) {
@@ -450,8 +536,9 @@ func MemcoreObjectRebind(id ObjectID, mark MarkRaw) {
 	objectRegistry[id] = mark
 }
 
-// MemcoreObjectUnregister removes an object mapping entirely.
-//
+/*
+MemcoreObjectUnregister clears object id and recycles its slot.
+*/
 //go:nosplit
 //go:inline
 func MemcoreObjectUnregister(id ObjectID) {
@@ -463,8 +550,12 @@ func MemcoreObjectUnregister(id ObjectID) {
 	objectFreeList = append(objectFreeList, id)
 }
 
-// MemcoreObjectResolve retrieves the MarkRaw associated with an ObjectID.
-//
+/*
+MemcoreObjectResolve returns the mark for id when the object and region are still active.
+
+[Returns]
+The mark and true on success; zero mark and false if id is unknown or region was unregistered.
+*/
 //go:nosplit
 //go:inline
 func MemcoreObjectResolve(id ObjectID) (MarkRaw, bool) {
@@ -480,7 +571,9 @@ func MemcoreObjectResolve(id ObjectID) (MarkRaw, bool) {
 	return m, true
 }
 
-// MemcoreObjectRegistryClear resets all object mappings.
+/*
+MemcoreObjectRegistryClear drops all object mappings.
+*/
 func MemcoreObjectRegistryClear() {
 	objectRegistry = make([]MarkRaw, 0)
 	objectFreeList = make([]uint32, 0)

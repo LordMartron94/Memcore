@@ -4,27 +4,39 @@ package memcore
 
 import "golang.org/x/sys/unix"
 
-// MemoryProtectionFlag represents mmap protection flags (PROT_*).
+/*
+MemoryProtectionFlag mirrors mmap(2) and mprotect(2) PROT_* protection bits.
+*/
 type MemoryProtectionFlag int
 
-// MemoryMapFlag represents mmap mapping flags (MAP_*).
+/*
+MemoryMapFlag mirrors mmap(2) MAP_* mapping creation and behavior flags.
+*/
 type MemoryMapFlag int
 
-// MemoryAdviceFlag represents madvise(2) flags.
+/*
+MemoryAdviceFlag mirrors madvise(2) MADV_* paging hints.
+*/
 type MemoryAdviceFlag int
 
-// MemorySyncFlag represents msync(2) flags.
+/*
+MemorySyncFlag mirrors msync(2) MS_* synchronization flags.
+*/
 type MemorySyncFlag int
 
-// MemoryLockAllFlag represents mlockall(2) flags.
+/*
+MemoryLockAllFlag mirrors mlockall(2) MCL_* flags.
+*/
 type MemoryLockAllFlag int
 
-// MemoryRemapFlag represents mremap(2) flags (MREMAP_*).
+/*
+MemoryRemapFlag mirrors mremap(2) MREMAP_* resize flags.
+*/
 type MemoryRemapFlag int
 
-// Protection flags (mmap PROT_*). These determine the permitted operations
-// on a mapped memory region. They correspond directly to the PROT_* flags
-// accepted by mmap(2) and mprotect(2).
+/*
+Protection flags (PROT_*). Combine with bitwise OR where the platform allows.
+*/
 const (
 	// PROT_NONE marks pages as inaccessible. Any access will result in a SIGSEGV.
 	PROT_NONE MemoryProtectionFlag = unix.PROT_NONE
@@ -45,7 +57,9 @@ const (
 	PROT_ALL MemoryProtectionFlag = PROT_READ | PROT_WRITE | PROT_EXEC
 )
 
-// Memory flags (mmap MAP_*). These control how a mapping is created and behaves.
+/*
+Memory map flags (MAP_*). Control sharing, anonymity, placement, and optional behaviors.
+*/
 const (
 	// MAP_SHARED creates a mapping that is shared with other processes mapping the same
 	// file. Writes are visible to others and may be written back to the file.
@@ -130,8 +144,9 @@ const (
 	MAP_ANON_LOCKED MemoryMapFlag = MAP_PRIVATE | MAP_ANONYMOUS | MAP_LOCKED
 )
 
-// Memory advice flags (for madvise(2)). These provide the kernel with hints about
-// expected memory usage patterns, which can influence paging and caching behavior.
+/*
+Memory advice flags (MADV_*). Hints for paging, read-ahead, and reclamation via MemmapAdvise.
+*/
 const (
 	// MADV_NORMAL specifies the default kernel paging behavior.
 	MADV_NORMAL MemoryAdviceFlag = unix.MADV_NORMAL
@@ -195,8 +210,9 @@ const (
 	MADV_KEEPONFORK MemoryAdviceFlag = unix.MADV_KEEPONFORK
 )
 
-// MemorySyncFlag represents msync(2) flags, which control how changes to a mapping
-// are synchronized with the underlying file.
+/*
+Memory sync flags (MS_*). Control how dirty pages are written back via MemmapSync.
+*/
 const (
 	// MS_ASYNC schedules writes back to storage asynchronously and returns immediately.
 	MS_ASYNC MemorySyncFlag = unix.MS_ASYNC
@@ -209,7 +225,9 @@ const (
 	MS_INVALIDATE MemorySyncFlag = unix.MS_INVALIDATE
 )
 
-// MemoryLockAllFlag represents flags for mlockall(2).
+/*
+Memory lock-all flags (MCL_*). Used with MemmapLockAll.
+*/
 const (
 	// MCL_CURRENT locks all pages currently mapped into the calling process's address space.
 	MCL_CURRENT MemoryLockAllFlag = unix.MCL_CURRENT
@@ -221,7 +239,9 @@ const (
 	MCL_ONFAULT MemoryLockAllFlag = unix.MCL_ONFAULT
 )
 
-// MemoryRemapFlag represents mremap(2) flags, controlling how an existing mapping is resized.
+/*
+Memory remap flags (MREMAP_*). Used with MemmapRemap and MemmapRemapAt.
+*/
 const (
 	// MREMAP_MAYMOVE allows the kernel to relocate the mapping to a new address if
 	// in-place expansion is not possible.

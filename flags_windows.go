@@ -2,6 +2,13 @@
 
 package memcore
 
+/*
+Windows definitions for mmap-related flag types used by the public memcore API.
+
+[Context]
+Constants mirror Unix names where possible; platformMemmap* in memmap_windows.go maps them to
+VirtualAlloc, VirtualProtect, and related Win32 calls.
+*/
 type (
 	MemoryProtectionFlag int
 	MemoryMapFlag        int

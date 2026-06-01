@@ -4,22 +4,34 @@ package memcore
 
 import "golang.org/x/sys/unix"
 
-// MemoryProtectionFlag represents mmap protection flags (PROT_*).
+/*
+MemoryProtectionFlag mirrors mmap PROT_* protection bits on Darwin.
+*/
 type MemoryProtectionFlag int
 
-// MemoryMapFlag represents mmap mapping flags (MAP_*).
+/*
+MemoryMapFlag mirrors mmap MAP_* flags on Darwin.
+*/
 type MemoryMapFlag int
 
-// MemoryAdviceFlag represents madvise(2) flags.
+/*
+MemoryAdviceFlag mirrors madvise MADV_* flags on Darwin.
+*/
 type MemoryAdviceFlag int
 
-// MemorySyncFlag represents msync(2) flags.
+/*
+MemorySyncFlag mirrors msync MS_* flags on Darwin.
+*/
 type MemorySyncFlag int
 
-// MemoryLockAllFlag represents mlockall(2) flags.
+/*
+MemoryLockAllFlag mirrors mlockall MCL_* flags on Darwin.
+*/
 type MemoryLockAllFlag int
 
-// MemoryRemapFlag represents mremap(2) flags on Linux; on Darwin remap is emulated in memmap_darwin.go.
+/*
+MemoryRemapFlag is accepted by MemmapRemap APIs; Darwin emulates resize in memmap_darwin.go.
+*/
 type MemoryRemapFlag int
 
 const (
@@ -32,12 +44,12 @@ const (
 )
 
 const (
-	MAP_SHARED      MemoryMapFlag = unix.MAP_SHARED
-	MAP_PRIVATE     MemoryMapFlag = unix.MAP_PRIVATE
-	MAP_FIXED       MemoryMapFlag = unix.MAP_FIXED
-	MAP_ANONYMOUS   MemoryMapFlag = unix.MAP_ANON
-	MAP_NORESERVE   MemoryMapFlag = unix.MAP_NORESERVE
-	MAP_ANON        MemoryMapFlag = MAP_ANONYMOUS
+	MAP_SHARED       MemoryMapFlag = unix.MAP_SHARED
+	MAP_PRIVATE      MemoryMapFlag = unix.MAP_PRIVATE
+	MAP_FIXED        MemoryMapFlag = unix.MAP_FIXED
+	MAP_ANONYMOUS    MemoryMapFlag = unix.MAP_ANON
+	MAP_NORESERVE    MemoryMapFlag = unix.MAP_NORESERVE
+	MAP_ANON         MemoryMapFlag = MAP_ANONYMOUS
 	MAP_ANON_PRIVATE MemoryMapFlag = MAP_PRIVATE | MAP_ANONYMOUS
 	MAP_ANON_SHARED  MemoryMapFlag = MAP_SHARED | MAP_ANONYMOUS
 )
@@ -63,7 +75,9 @@ const (
 	MCL_FUTURE  MemoryLockAllFlag = unix.MCL_FUTURE
 )
 
-// Remap flag values are not used by the kernel on Darwin; memmap_darwin.go emulates mremap.
+/*
+Memory remap flags accepted by MemmapRemap; Darwin implements resize in memmap_darwin.go.
+*/
 const (
 	MREMAP_MAYMOVE   MemoryRemapFlag = 1
 	MREMAP_FIXED     MemoryRemapFlag = 2

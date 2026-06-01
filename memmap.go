@@ -1,4 +1,3 @@
-// Package memcore provides low-level core infrastructure for memory management.
 package memcore
 
 import (
@@ -9,9 +8,27 @@ import (
 
 var mmapRegistry sync.Map
 
-// MemoryMap represents a mapped memory region.
+/*
+MemoryMap is a byte slice header over an mmap-backed region tracked by memcore.
+*/
 type MemoryMap []byte
 
+/*
+MemmapRequest creates a new mapping of byteAmount bytes.
+
+[Parameters]
+protection - PROT_* flags for the mapping.
+flags - MAP_* flags (anonymous mappings typically use MAP_ANON_PRIVATE).
+
+[Returns]
+A MemoryMap view and nil error on success.
+
+[Errors]
+Returns the platform mmap error when mapping fails.
+
+[Side Effects]
+Registers the mapping base in mmapRegistry for leak tracking.
+*/
 func MemmapRequest(byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (MemoryMap, error) {
 	m, err := platformMemmapRequest(byteAmount, protection, flags)
 	if err == nil && len(m) > 0 {
@@ -20,6 +37,9 @@ func MemmapRequest(byteAmount int, protection MemoryProtectionFlag, flags Memory
 	return m, err
 }
 
+/*
+MemmapUnmap releases a mapping created via MemmapRequest or MemmapRequestFromFile.
+*/
 func MemmapUnmap(memmap MemoryMap) error {
 	err := platformMemmapUnmap(memmap)
 	if err == nil && len(memmap) > 0 {
@@ -28,34 +48,64 @@ func MemmapUnmap(memmap MemoryMap) error {
 	return err
 }
 
+/*
+MemmapProtect changes protection on an existing mapping.
+*/
 func MemmapProtect(memmap MemoryMap, protection MemoryProtectionFlag) error {
 	return platformMemmapProtect(memmap, protection)
 }
 
+/*
+MemmapLock locks the mapping's pages in RAM (mlock).
+*/
 func MemmapLock(memmap MemoryMap) error {
 	return platformMemmapLock(memmap)
 }
 
+/*
+MemmapUnlock unlocks pages previously locked with MemmapLock.
+*/
 func MemmapUnlock(memmap MemoryMap) error {
 	return platformMemmapUnlock(memmap)
 }
 
+/*
+MemmapLockAll locks or unlocks all mapped pages per flags (mlockall).
+*/
 func MemmapLockAll(flags MemoryLockAllFlag) error {
 	return platformMemmapLockAll(flags)
 }
 
+/*
+MemmapUnlockAll unlocks all pages locked via MemmapLockAll.
+*/
 func MemmapUnlockAll() error {
 	return platformMemmapUnlockAll()
 }
 
+/*
+MemmapAdvise applies madvise hints to a mapping.
+*/
 func MemmapAdvise(memmap MemoryMap, advice MemoryAdviceFlag) error {
 	return platformMemmapAdvise(memmap, advice)
 }
 
+/*
+MemmapSync flushes mapped pages to backing storage per syncFlags (msync).
+*/
 func MemmapSync(memmap MemoryMap, syncFlags MemorySyncFlag) error {
 	return platformMemmapSync(memmap, syncFlags)
 }
 
+/*
+MemmapRemap resizes an existing mapping in place when the platform supports it.
+
+[Returns]
+The new MemoryMap slice and nil error on success.
+
+[Side Effects]
+Updates mmapRegistry when the mapping base or size changes.
+*/
 func MemmapRemap(memmap MemoryMap, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
 	m, err := platformMemmapRemap(memmap, newSize, flags)
 	if err == nil && len(m) > 0 && len(memmap) > 0 {
@@ -65,6 +115,16 @@ func MemmapRemap(memmap MemoryMap, newSize int, flags MemoryRemapFlag) (MemoryMa
 	return m, err
 }
 
+/*
+MemmapRemapAt resizes the mapping at addr, optionally moving it (MREMAP_MAYMOVE).
+
+[Parameters]
+addr - Base of the existing mapping.
+oldSize, newSize - Previous and requested mapping sizes in bytes.
+
+[Side Effects]
+Updates mmapRegistry on success.
+*/
 func MemmapRemapAt(addr unsafe.Pointer, oldSize, newSize int, flags MemoryRemapFlag) (MemoryMap, error) {
 	m, err := platformMemmapRemapAt(addr, oldSize, newSize, flags)
 	if err == nil && len(m) > 0 {
@@ -74,6 +134,15 @@ func MemmapRemapAt(addr unsafe.Pointer, oldSize, newSize int, flags MemoryRemapF
 	return m, err
 }
 
+/*
+MemmapRequestAt maps byteAmount bytes at a fixed addr (MAP_FIXED semantics on Unix).
+
+[Returns]
+addr on success when the platform returns the requested address.
+
+[Side Effects]
+Registers addr in mmapRegistry on success.
+*/
 func MemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection MemoryProtectionFlag, flags MemoryMapFlag) (unsafe.Pointer, error) {
 	mmap, err := platformMemmapRequestAt(addr, byteAmount, protection, flags)
 	if err == nil {
@@ -82,6 +151,9 @@ func MemmapRequestAt(addr unsafe.Pointer, byteAmount int, protection MemoryProte
 	return mmap, err
 }
 
+/*
+MemmapUnmapAt unmaps byteAmount bytes starting at addr.
+*/
 func MemmapUnmapAt(addr unsafe.Pointer, byteAmount int) error {
 	err := platformMemmapUnmapAt(addr, byteAmount)
 	if err == nil {
@@ -91,8 +163,15 @@ func MemmapUnmapAt(addr unsafe.Pointer, byteAmount int) error {
 	return err
 }
 
-// MemmapUnmapAllRegions forcibly unmaps every region tracked in mmapRegistry.
-// Used to guarantee no leaks remain after panic or abrupt benchmark termination.
+/*
+MemmapUnmapAllRegions forcibly unmaps every region still listed in mmapRegistry.
+
+[Context]
+Used after panic or abrupt benchmark teardown to avoid leaking mmap regions.
+
+[Side Effects]
+Iterates the registry and calls MemmapUnmapAt for each tracked base.
+*/
 func MemmapUnmapAllRegions() {
 	mmapRegistry.Range(func(k, v any) bool {
 		size := v.(int)
@@ -105,62 +184,38 @@ func MemmapUnmapAllRegions() {
 /*
 MemmapPageSizeGet returns the system page size in bytes.
 
-The page size is typically 4096 bytes on most systems, but can vary (e.g., 65536 bytes
-on some ARM systems). This value is required for aligning file offsets when creating
-file-backed memory mappings.
+[Context]
+Required for page-aligned file offsets when using MemmapRequestFromFile and MemmapAlignOffset.
 
-Use cases:
-- Aligning file offsets for mmap operations
-- Calculating page-aligned buffer sizes
-- Memory layout optimization
+[Returns]
+Typically 4096 on common Linux systems; may differ on some ARM hosts. Always a power of two.
 
-Time complexity: O(1) - cached or single system call
-Space complexity: O(1) - no allocations
+[Complexity]
+Time: O(1). Space: O(1).
 
-Prerequisites:
-- None
-
-Edge cases:
-- Page size is constant for the lifetime of the process
-- May vary between different systems or architectures
-- Always a power of two
-
-The returned value is suitable for use with MemmapAlignOffset to align file offsets.
+[Side Effects]
+Pure; value is fixed for the process lifetime.
 */
 func MemmapPageSizeGet() int {
 	return platformMemmapPageSizeGet()
 }
 
 /*
-MemmapAlignOffset rounds a file offset up to the nearest page boundary.
+MemmapAlignOffset rounds offset up to the next page boundary.
 
-File-backed memory mappings require offsets to be aligned to the system page size.
-This function ensures proper alignment by rounding up to the nearest multiple of
-the page size.
+[Parameters]
+offset - File offset in bytes; must be >= 0.
 
-Use cases:
-- Preparing file offsets for MemmapRequestFromFile
-- Ensuring proper alignment for memory-mapped files
-- Vector store file layout calculations
+[Returns]
+The smallest page-aligned offset >= offset.
 
-Time complexity: O(1) - simple bitwise arithmetic
-Space complexity: O(1) - no allocations
+[Complexity]
+Time: O(1). Space: O(1).
 
-Prerequisites:
-- offset must be >= 0
-- Page size must be a power of two (guaranteed by system)
+[Example]
 
-Edge cases:
-- Returns 0 if offset is 0
-- Returns page size if offset is 1
-- Handles large offsets correctly (up to int64 max)
-
-Formula: aligned = (offset + pageSize - 1) &^ (pageSize - 1)
-
-Example:
-
-	pageSize := MemmapPageSizeGet() // 4096
-	aligned := MemmapAlignOffset(5000) // returns 8192
+	pageSize := MemmapPageSizeGet()
+	aligned := MemmapAlignOffset(5000) // 8192 when page size is 4096
 */
 func MemmapAlignOffset(offset int64) int64 {
 	pageSize := int64(MemmapPageSizeGet())
@@ -169,41 +224,22 @@ func MemmapAlignOffset(offset int64) int64 {
 }
 
 /*
-MemmapRequestFromFile maps a file-backed memory region.
+MemmapRequestFromFile maps length bytes from an open file at a page-aligned offset.
 
-The file descriptor must be valid and opened with appropriate permissions matching
-the protection flags. For read-only mappings, open the file with O_RDONLY. For
-read-write mappings, open the file with O_RDWR.
+[Parameters]
+fd - Valid OS file descriptor with permissions matching protection.
+offset - Must be page-aligned (use MemmapAlignOffset).
+length - Bytes to map; must be > 0.
+protection, flags - mmap protection and MAP_* flags; must not include MAP_ANONYMOUS.
 
-The offset must be page-aligned (use MemmapAlignOffset to ensure proper alignment).
-The length determines how many bytes to map from the file starting at the offset.
+[Returns]
+A MemoryMap over the file region.
 
-Use cases:
-- Zero-copy file I/O for vector stores
-- Persistent data structures with O(1) access
-- Database-like storage engines
-- Large file processing without loading into RAM
+[Errors]
+Returns an error when length <= 0, MAP_ANONYMOUS is set, or the platform mmap fails.
 
-Time complexity: O(1) - single system call
-Space complexity: O(1) - no additional allocations beyond the mapping
-
-Prerequisites:
-- fd must be a valid file descriptor from os.File.Fd()
-- offset must be page-aligned (use MemmapAlignOffset)
-- length must be > 0
-- file must be opened with permissions matching the protection flags
-- flags must NOT include MAP_ANONYMOUS (file-backed mappings cannot be anonymous)
-- file must be large enough to contain offset+length bytes
-
-Edge cases:
-- Returns error if file is too small for offset+length
-- MAP_SHARED: writes are visible to other processes and persisted to disk
-- MAP_PRIVATE: creates copy-on-write mapping, changes not visible to others
-- File descriptor must remain open for the lifetime of the mapping
-- Unmapping does not close the file descriptor (caller responsibility)
-
-The mapped region is automatically registered in the mmap registry and can be used
-with all existing memcore functions (MemmapSync, MemmapUnmap, etc.).
+[Side Effects]
+Registers the mapping in mmapRegistry. The fd must stay open for the mapping lifetime.
 */
 func MemmapRequestFromFile(fd int, offset int64, length int, protection MemoryProtectionFlag, flags MemoryMapFlag) (MemoryMap, error) {
 	if length <= 0 {
@@ -222,34 +258,17 @@ func MemmapRequestFromFile(fd int, offset int64, length int, protection MemoryPr
 }
 
 /*
-MemmapFileResize sets the size of a file to the specified number of bytes.
+MemmapFileResize sets the file size to sizeBytes (ftruncate / platform equivalent).
 
-This function is required before mapping a file with MemmapRequestFromFile if the file
-does not already exist or is smaller than the desired mapping size. The file must be
-opened with write permissions (O_RDWR or O_WRONLY).
+[Context]
+Call before MemmapRequestFromFile when creating or growing a file-backed store.
 
-Use cases:
-- Initializing new files for memory-mapped vector stores
-- Pre-allocating space for persistent data structures
-- Resizing existing mapped files before remapping
+[Parameters]
+fd - File descriptor opened for write (O_RDWR or O_WRONLY).
+sizeBytes - New file size; truncates or zero-extends.
 
-Time complexity: O(1) - single system call
-Space complexity: O(1) - no allocations
-
-Prerequisites:
-- fd must be a valid file descriptor from os.File.Fd()
-- file must be opened with write permissions (O_RDWR or O_WRONLY)
-- sizeBytes must be >= 0
-
-Edge cases:
-- If sizeBytes is smaller than current file size, file is truncated
-- If sizeBytes is larger than current file size, file is extended (filled with zeros)
-- On Unix, uses ftruncate(2)
-- On Windows, uses Ftruncate which internally uses SetFilePointer + SetEndOfFile
-- Returns error if file descriptor is invalid or lacks write permissions
-
-The file size must be set before calling MemmapRequestFromFile with a length
-that exceeds the current file size.
+[Errors]
+Returns an error when sizeBytes < 0 or the platform call fails.
 */
 func MemmapFileResize(fd int, sizeBytes int64) error {
 	if sizeBytes < 0 {

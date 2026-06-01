@@ -5,10 +5,18 @@ import (
 	"unsafe"
 )
 
-// SizeOf returns the size of any item in an int64-type.
-// Note: This is safe for most operating systems, but on certain exotic architectures,
-// the conversion can result in mismatches.
-//
+/*
+SizeOf returns the size in bytes of T using unsafe.Sizeof.
+
+[Complexity]
+Time: O(1). Space: O(1).
+
+[Side Effects]
+Pure at compile time; result is constant for a given T.
+
+[Edge Cases]
+On exotic architectures, uint64 conversion from unsafe.Sizeof could theoretically differ from native size_t expectations.
+*/
 //go:inline
 //go:nosplit
 func SizeOf[T any]() uint64 {
@@ -16,8 +24,9 @@ func SizeOf[T any]() uint64 {
 	return (uint64)(unsafe.Sizeof(zero))
 }
 
-// AlignOf returns the alignment of an arbitary type.
-//
+/*
+AlignOf returns the required alignment of T using unsafe.Alignof.
+*/
 //go:inline
 //go:nosplit
 func AlignOf[T any]() uint64 {
@@ -25,27 +34,34 @@ func AlignOf[T any]() uint64 {
 	return (uint64)(unsafe.Alignof(zero))
 }
 
-// TypeOf wraps reflect.TypeFor[T]
-//
+/*
+TypeOf returns reflect.TypeFor[T].
+*/
 //go:inline
 //go:nosplit
 func TypeOf[T any]() reflect.Type {
 	return reflect.TypeFor[T]()
 }
 
-// AlignUp rounds `n` up to the nearest multiple of `alignment`.
-//
-// It uses efficient bit-masking to avoid division or modulo operations.
-// The alignment value must be a power of two.
-//
-// For example:
-//
-//	AlignUp(13, 8)  => 16
-//	AlignUp(32, 8)  => 32
-//
-// This function is typically used for aligning memory offsets, sizes,
-// or indices to machine-friendly boundaries.
-//
+/*
+AlignUp rounds n up to the next multiple of alignment using bit masking.
+
+[Parameters]
+alignment - Must be a power of two.
+
+[Returns]
+The smallest value >= n divisible by alignment.
+
+[Example]
+	AlignUp(13, 8) => 16
+	AlignUp(32, 8) => 32
+
+[Complexity]
+Time: O(1). Space: O(1).
+
+[Side Effects]
+Pure function.
+*/
 //go:inline
 //go:nosplit
 func AlignUp(n, alignment uint64) uint64 {
@@ -53,23 +69,22 @@ func AlignUp(n, alignment uint64) uint64 {
 	return (n + mask) &^ mask
 }
 
-// NextPowerOfTwo returns the smallest power of two greater than or equal to `x`.
-//
-// If `x` is already a power of two, it is returned unchanged.
-// For example:
-//
-//	NextPowerOfTwo(0)  => 1
-//	NextPowerOfTwo(1)  => 1
-//	NextPowerOfTwo(5)  => 8
-//	NextPowerOfTwo(64) => 64
-//
-// This function uses a branchless bit-twiddling method that runs in constant time
-// and avoids loops or floating-point operations.
-//
-// ⚠️ Range:
-// - For inputs in [0, 2⁶³], the result is always valid.
-// - For inputs in (2⁶³, 2⁶⁴−1], the function overflows to 0 due to bit shifting limits.
-//
+/*
+NextPowerOfTwo returns the smallest power of two greater than or equal to x.
+
+[Returns]
+1 when x is 0; x unchanged when x is already a power of two.
+
+[Example]
+	NextPowerOfTwo(5)  => 8
+	NextPowerOfTwo(64) => 64
+
+[Complexity]
+Time: O(1). Space: O(1).
+
+[Edge Cases]
+For x in (2^63, 2^64-1] the bit-twiddling path overflows to 0.
+*/
 //go:inline
 //go:nosplit
 func NextPowerOfTwo(x uint64) uint64 {
@@ -86,16 +101,18 @@ func NextPowerOfTwo(x uint64) uint64 {
 	return x + 1
 }
 
-// IsAligned reports whether the given pointer is aligned to `alignment` bytes.
-//
-// The alignment must be a power of two.
-// This function performs a pure address check and does not inspect memory.
-//
-// Typical use cases:
-// - SIMD kernel precondition checks
-// - Asserting allocator guarantees
-// - Selecting aligned vs unaligned fast paths
-//
+/*
+IsAligned reports whether ptr's address is divisible by alignment.
+
+[Parameters]
+alignment - Must be a power of two.
+
+[Errors]
+Panics if alignment is not a power of two.
+
+[Side Effects]
+Pure address check; does not read object contents.
+*/
 //go:inline
 //go:nosplit
 func IsAligned(ptr unsafe.Pointer, alignment uint64) bool {

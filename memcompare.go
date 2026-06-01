@@ -2,22 +2,32 @@ package memcore
 
 import "unsafe"
 
-// MemoryCompareNoHeapPointers compares two memory regions byte by byte.
-//
-// Returns true if both regions are identical for n bytes.
-// Safe only for memory known to contain no Go heap pointers.
-//
-// For very small blocks, it performs direct register compares.
-// For mid-size ranges, it uses a manual tight loop.
-// For larger sizes, it defers to the runtime’s highly optimized memcmp.
-//
+/*
+MemoryCompareNoHeapPointers reports whether two regions of n bytes are byte-identical.
+
+[Context]
+Safe only when both regions contain no Go heap pointers. Uses scalar compares for tiny sizes,
+a manual loop up to manualThreshold, then runtime.memequal.
+
+[Parameters]
+a, b - Region bases; identical pointers compare equal for any n.
+n - Byte count; zero compares equal.
+
+[Returns]
+true when all n bytes match.
+
+[Complexity]
+Time: O(n). Space: O(1).
+
+[Side Effects]
+Pure function; read-only on both regions.
+*/
 //go:nosplit
 func MemoryCompareNoHeapPointers(a, b unsafe.Pointer, n uintptr) bool {
 	if n == 0 || a == b {
 		return true
 	}
 
-	// Ultra-small: direct scalar compares (register level)
 	switch n {
 	case 1:
 		return *(*uint8)(a) == *(*uint8)(b)
@@ -29,7 +39,6 @@ func MemoryCompareNoHeapPointers(a, b unsafe.Pointer, n uintptr) bool {
 		return *(*uint64)(a) == *(*uint64)(b)
 	}
 
-	// Small/medium: tight manual loop (branchless for < manualThreshold)
 	if n <= manualThreshold {
 		ap := uintptr(a)
 		bp := uintptr(b)
@@ -41,7 +50,6 @@ func MemoryCompareNoHeapPointers(a, b unsafe.Pointer, n uintptr) bool {
 		return true
 	}
 
-	// Large: delegate to runtime’s vectorized SSE2/AVX path
 	return memequalInternal(a, b, n)
 }
 
