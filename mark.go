@@ -151,6 +151,29 @@ func MemcoreRegionBaseUpdate(regionID uint32, newBase uintptr) {
 	regionBases[regionID] = newBase
 }
 
+/*
+MemcoreAddressBelongsToActiveRegion reports whether address lies inside any active region span.
+
+[Returns]
+True when address is within [region.base, region.base+region.sizeBytes) for an active region.
+*/
+func MemcoreAddressBelongsToActiveRegion(address uintptr) bool {
+	if address == 0 {
+		return false
+	}
+	for i := 1; i < len(regionRegistry); i++ {
+		region := regionRegistry[i]
+		if !region.active || region.base == 0 || region.sizeBytes == 0 {
+			continue
+		}
+		regionEnd := region.base + uintptr(region.sizeBytes)
+		if address >= region.base && address < regionEnd {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------- MARKS
 
 /*
