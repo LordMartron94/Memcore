@@ -102,6 +102,24 @@ MemcoreMarkDereference rather than retaining raw uintptrs across growth or remap
 
 [Invariants]
 Marks are only valid while their region is registered and active. Unsafe variants skip checks.
+
+[Fast APIs]
+Libraries built on memcore (memstruct, memforge, memarch) expose *Fast siblings for operations
+that would otherwise dereference a MarkRaw on every call. Callers that invoke multiple such
+operations on the same mark in a stable scope should dereference once, then use *Fast.
+
+Stability contract: *Fast is only valid while the backing region is unchanged between the
+caller's dereference and the last *Fast use — no remap, arena reset, destroy, or unregister.
+
+Dereference choice:
+- MemcoreMarkDereferenceObjectUnsafe — header object only (*T).
+- MemcoreMarkDereferenceObjectAltUnsafe — (baseAddr, *T) when header and data may be non-contiguous.
+
+Single-call sites should keep the MarkRaw API; hoisting deref saves work only when reused.
+
+Composite headers (for example memstruct.FixedOrderedList) may cache *T sub-headers and
+Alt bases for co-located children instead of storing child MarkRaw fields, when child
+lifetime matches the parent blob.
 */
 type MarkRaw struct {
 	regionID uint32
