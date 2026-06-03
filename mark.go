@@ -3,6 +3,7 @@ package memcore
 import (
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -13,7 +14,7 @@ type funcKey struct {
 
 var (
 	// Initialize with one empty/inactive region so the first real region gets ID 1
-	regionRegistry []memoryRegion = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
+	regionRegistry []memoryRegion = []memoryRegion{{base: 0, sizeBytes: 0, active: false, opaque: false}}
 	regionFreeList []uint32       = make([]uint32, 0)
 	regionBases    []uintptr      = []uintptr{0}
 
@@ -41,7 +42,7 @@ func MemcoreMarkManagementStateReset(resetFunctions bool) {
 		MemcoreFunctionRegistryClear()
 	}
 
-	regionRegistry = []memoryRegion{{base: 0, sizeBytes: 0, active: false}}
+	regionRegistry = []memoryRegion{{base: 0, sizeBytes: 0, active: false, opaque: false}}
 	regionFreeList = make([]uint32, 0)
 	regionBases = []uintptr{0}
 
@@ -59,9 +60,37 @@ ObjectID identifies a MarkRaw registered in the memcore object registry.
 type ObjectID = uint32
 
 type memoryRegion struct {
-	base      uintptr
-	sizeBytes uint64
-	active    bool
+	base             uintptr
+	sizeBytes        uint64
+	active           bool
+	opaque           bool
+	parentRegionID   uint32
+	parentByteOffset uintptr
+	activeChildCount int32
+}
+
+func memoryRegionRootInit(base uintptr, sizeBytes uint64, opaque bool) memoryRegion {
+	return memoryRegion{
+		base:      base,
+		sizeBytes: sizeBytes,
+		active:    true,
+		opaque:    opaque,
+	}
+}
+
+func memoryRegionSubRegionInit(
+	parentRegionID uint32,
+	parentByteOffset uintptr,
+	capacityBytes uint64,
+	opaque bool,
+) memoryRegion {
+	return memoryRegion{
+		sizeBytes:        capacityBytes,
+		active:           true,
+		opaque:           opaque,
+		parentRegionID:   parentRegionID,
+		parentByteOffset: parentByteOffset,
+	}
 }
 
 /*
@@ -101,11 +130,11 @@ func MemcoreRegionRegister(baseAddr uintptr, sizeBytes uint64) uint32 {
 	if len(regionFreeList) > 0 {
 		id = regionFreeList[len(regionFreeList)-1]
 		regionFreeList = regionFreeList[:len(regionFreeList)-1]
-		regionRegistry[id] = memoryRegion{baseAddr, sizeBytes, true}
+		regionRegistry[id] = memoryRegionRootInit(baseAddr, sizeBytes, false)
 		regionBases[id] = baseAddr
 	} else {
 		id = uint32(len(regionRegistry))
-		regionRegistry = append(regionRegistry, memoryRegion{baseAddr, sizeBytes, true})
+		regionRegistry = append(regionRegistry, memoryRegionRootInit(baseAddr, sizeBytes, false))
 		regionBases = append(regionBases, baseAddr)
 	}
 	return id
@@ -114,11 +143,7 @@ func MemcoreRegionRegister(baseAddr uintptr, sizeBytes uint64) uint32 {
 /*
 MemcoreRegionUnregister deactivates a region and recycles its ID.
 
-[Parameters]
-regionID - Previously returned by MemcoreRegionRegister.
-
-[Side Effects]
-Marks in this region become invalid for MemcoreMarkDereference; no-op if regionID is out of range.
+Sub-regions decrement the parent activeChildCount. Root regions panic when activeChildCount is non-zero.
 */
 //go:nosplit
 //go:inline
@@ -126,16 +151,57 @@ func MemcoreRegionUnregister(regionID uint32) {
 	if int(regionID) >= len(regionRegistry) {
 		return
 	}
+
 	r := &regionRegistry[regionID]
+	if !r.active {
+		return
+	}
+
+	if r.parentRegionID != 0 {
+		memcoreRegionActiveChildCountDecrement(r.parentRegionID)
+	} else if atomic.LoadInt32(&r.activeChildCount) > 0 {
+		panic("memcore: cannot unregister root region with active sub-regions")
+	}
+
 	r.base = 0
 	r.sizeBytes = 0
 	r.active = false
+	r.opaque = false
+	r.parentRegionID = 0
+	r.parentByteOffset = 0
+	r.activeChildCount = 0
 
 	if int(regionID) < len(regionBases) {
 		regionBases[regionID] = 0
 	}
 
 	regionFreeList = append(regionFreeList, regionID)
+}
+
+func memcoreRegionActiveChildCountIncrement(parentRegionID uint32) {
+	if int(parentRegionID) >= len(regionRegistry) {
+		panic("memcore: invalid parent region ID for sub-region registration")
+	}
+
+	parent := &regionRegistry[parentRegionID]
+	if !parent.active {
+		panic("memcore: inactive parent region for sub-region registration")
+	}
+
+	atomic.AddInt32(&parent.activeChildCount, 1)
+}
+
+func memcoreRegionActiveChildCountDecrement(parentRegionID uint32) {
+	if int(parentRegionID) >= len(regionRegistry) {
+		return
+	}
+
+	parent := &regionRegistry[parentRegionID]
+	if !parent.active {
+		return
+	}
+
+	atomic.AddInt32(&parent.activeChildCount, -1)
 }
 
 /*
@@ -152,6 +218,217 @@ func MemcoreRegionBaseUpdate(regionID uint32, newBase uintptr) {
 }
 
 /*
+MemcoreRegionRegisterOpaque records a logical region with no CPU mapping.
+
+[Context]
+Use for GPU device memory and other backends where offsets are tracked in memcore but bytes are
+not dereferenceable from the host. Marks in opaque regions are valid handles for bind offsets only.
+
+[Returns]
+A region ID with logical size sizeBytes and base address zero.
+*/
+//go:nosplit
+//go:inline
+func MemcoreRegionRegisterOpaque(sizeBytes uint64) uint32 {
+	var id uint32
+	if len(regionFreeList) > 0 {
+		id = regionFreeList[len(regionFreeList)-1]
+		regionFreeList = regionFreeList[:len(regionFreeList)-1]
+		regionRegistry[id] = memoryRegionRootInit(0, sizeBytes, true)
+		regionBases[id] = 0
+	} else {
+		id = uint32(len(regionRegistry))
+		regionRegistry = append(regionRegistry, memoryRegionRootInit(0, sizeBytes, true))
+		regionBases = append(regionBases, 0)
+	}
+	return id
+}
+
+/*
+MemcoreRegionRegisterSubRegion creates an alias window into parentRegionID starting at parentOffset.
+
+The sub-region inherits the parent opaque flag and increments parent activeChildCount.
+*/
+//go:nosplit
+func MemcoreRegionRegisterSubRegion(parentRegionID uint32, parentOffset uintptr, capacityBytes uint64) uint32 {
+	if capacityBytes == 0 {
+		panic("memcore: sub-region capacity must be greater than zero")
+	}
+
+	if int(parentRegionID) >= len(regionRegistry) {
+		panic("memcore: invalid parent region ID for sub-region registration")
+	}
+
+	parent := regionRegistry[parentRegionID]
+	if !parent.active {
+		panic("memcore: inactive parent region for sub-region registration")
+	}
+
+	windowEnd := uint64(parentOffset) + capacityBytes
+	if windowEnd < uint64(parentOffset) || windowEnd > parent.sizeBytes {
+		panic("memcore: sub-region window exceeds parent region extent")
+	}
+
+	memcoreRegionActiveChildCountIncrement(parentRegionID)
+
+	var id uint32
+	if len(regionFreeList) > 0 {
+		id = regionFreeList[len(regionFreeList)-1]
+		regionFreeList = regionFreeList[:len(regionFreeList)-1]
+		regionRegistry[id] = memoryRegionSubRegionInit(parentRegionID, parentOffset, capacityBytes, parent.opaque)
+		regionBases[id] = 0
+	} else {
+		id = uint32(len(regionRegistry))
+		regionRegistry = append(regionRegistry, memoryRegionSubRegionInit(parentRegionID, parentOffset, capacityBytes, parent.opaque))
+		regionBases = append(regionBases, 0)
+	}
+
+	return id
+}
+
+/*
+MemcoreRegionRegisterSubRegionFromMark registers a sub-region at parentMark with capacityBytes.
+*/
+//go:nosplit
+//go:inline
+func MemcoreRegionRegisterSubRegionFromMark(parentMark MarkRaw, capacityBytes uint64) uint32 {
+	return MemcoreRegionRegisterSubRegion(
+		MemcoreMarkRegionIDGet(parentMark),
+		MemcoreMarkOffsetGet(parentMark),
+		capacityBytes,
+	)
+}
+
+/*
+MemcoreRegionIsSubRegion reports whether regionID refers to an active alias window.
+*/
+//go:nosplit
+//go:inline
+func MemcoreRegionIsSubRegion(regionID uint32) bool {
+	if int(regionID) >= len(regionRegistry) {
+		return false
+	}
+
+	region := regionRegistry[regionID]
+	return region.active && region.parentRegionID != 0
+}
+
+/*
+MemcoreMarkResolveToRoot walks sub-region parent chains and returns the absolute root mark.
+*/
+//go:nosplit
+func MemcoreMarkResolveToRoot(mark MarkRaw) MarkRaw {
+	regionID := mark.regionID
+	offset := mark.offset
+
+	for {
+		if int(regionID) >= len(regionRegistry) {
+			panic("memcore: invalid region ID during root resolution")
+		}
+
+		region := regionRegistry[regionID]
+		if !region.active {
+			panic("memcore: inactive region during root resolution")
+		}
+
+		if region.parentRegionID == 0 {
+			return MemcoreMarkCreate(regionID, offset)
+		}
+
+		offset += region.parentByteOffset
+		regionID = region.parentRegionID
+	}
+}
+
+/*
+MemcoreRegionIsOpaque reports whether regionID refers to an active opaque region.
+*/
+//go:nosplit
+//go:inline
+func MemcoreRegionIsOpaque(regionID uint32) bool {
+	if int(regionID) >= len(regionRegistry) {
+		return false
+	}
+	region := regionRegistry[regionID]
+	return region.active && region.opaque
+}
+
+/*
+MemcoreMarkRegionIsOpaque reports whether mark.regionID refers to an active opaque region.
+*/
+//go:nosplit
+//go:inline
+func MemcoreMarkRegionIsOpaque(mark MarkRaw) bool {
+	return MemcoreRegionIsOpaque(mark.regionID)
+}
+
+/*
+MemcoreMarkRegionIDGet returns the region ID embedded in mark.
+*/
+//go:nosplit
+//go:inline
+func MemcoreMarkRegionIDGet(mark MarkRaw) uint32 {
+	return mark.regionID
+}
+
+/*
+MemcoreMarkOffsetGet returns the byte offset embedded in mark.
+*/
+//go:nosplit
+//go:inline
+func MemcoreMarkOffsetGet(mark MarkRaw) uintptr {
+	return mark.offset
+}
+
+/*
+MemcoreMarkOffsetInBounds reports whether mark.offset plus sizeBytes lies within the region extent.
+
+[Returns]
+False when the region is inactive, sizeBytes overflows, or the range exceeds region.sizeBytes.
+*/
+//go:nosplit
+//go:inline
+func MemcoreMarkOffsetInBounds(mark MarkRaw, sizeBytes uint64) bool {
+	if int(mark.regionID) >= len(regionRegistry) {
+		return false
+	}
+	region := regionRegistry[mark.regionID]
+	if !region.active || region.sizeBytes == 0 {
+		return false
+	}
+	start := uint64(mark.offset)
+	end := start + sizeBytes
+	return end >= start && end <= region.sizeBytes
+}
+
+//go:nosplit
+//go:inline
+func memcoreMarkDereferenceGuard(region memoryRegion) {
+	if region.opaque {
+		panic("memcore: cannot dereference mark in opaque region")
+	}
+}
+
+/*
+MemcoreRegionSizeGet returns the registered byte extent of an active region.
+
+[Errors]
+Panics if regionID is invalid or inactive.
+*/
+//go:nosplit
+//go:inline
+func MemcoreRegionSizeGet(regionID uint32) uint64 {
+	if int(regionID) >= len(regionRegistry) {
+		panic("memcore: invalid region ID size query")
+	}
+	region := regionRegistry[regionID]
+	if !region.active {
+		panic("memcore: inactive region size query")
+	}
+	return region.sizeBytes
+}
+
+/*
 MemcoreAddressBelongsToActiveRegion reports whether address lies inside any active region span.
 
 [Returns]
@@ -163,7 +440,7 @@ func MemcoreAddressBelongsToActiveRegion(address uintptr) bool {
 	}
 	for i := 1; i < len(regionRegistry); i++ {
 		region := regionRegistry[i]
-		if !region.active || region.base == 0 || region.sizeBytes == 0 {
+		if !region.active || region.opaque || region.base == 0 || region.sizeBytes == 0 {
 			continue
 		}
 		regionEnd := region.base + uintptr(region.sizeBytes)
@@ -251,11 +528,13 @@ Pure aside from the panic path; does not mutate memory.
 //go:nosplit
 //go:inline
 func MemcoreMarkDereference(mark MarkRaw) unsafe.Pointer {
-	r := regionRegistry[mark.regionID]
+	resolved := MemcoreMarkResolveToRoot(mark)
+	r := regionRegistry[resolved.regionID]
 	if !r.active {
 		panic("memcore: invalid region ID dereference")
 	}
-	return unsafe.Pointer(r.base + mark.offset)
+	memcoreMarkDereferenceGuard(r)
+	return unsafe.Pointer(r.base + resolved.offset)
 }
 
 /*
@@ -267,7 +546,11 @@ Invalid regionID or offset produces undefined behavior rather than a guaranteed 
 //go:nosplit
 //go:inline
 func MemcoreMarkDereferenceUnsafe(mark MarkRaw) unsafe.Pointer {
-	return unsafe.Pointer(regionBases[mark.regionID] + mark.offset)
+	resolved := MemcoreMarkResolveToRoot(mark)
+	if int(resolved.regionID) < len(regionRegistry) {
+		memcoreMarkDereferenceGuard(regionRegistry[resolved.regionID])
+	}
+	return unsafe.Pointer(regionBases[resolved.regionID] + resolved.offset)
 }
 
 /*
